@@ -431,7 +431,14 @@ var PROG={}, BUF={}, GEO={};
 var camState={az:-0.55,el:0.86,dist:13.3,tAz:-0.55,tEl:0.86,tDist:13.3};
 var mP=NX.m4(), mV=NX.m4(), mVP=NX.m4(), mM=NX.m4(), mMVP=NX.m4();
 var eye=[0,0,0], camRight=[1,0,0], camUp=[0,1,0];
+var camLook=[0,0,0], focus=null;   /* what the camera is holding on to */
+var shiftNow=0.20, shiftTo=0.20, shiftBase=0.20;  /* off-axis framing */
 var W=1,H=1,DPR=1,FOV=1.0;
+/* Quality is measured, not assumed. The first ninety frames are timed on the
+   actual device; if the median frame is slower than 30ms the expensive
+   full-screen additive passes are dropped. A phone that can afford them keeps
+   them. */
+var QUAL=1, qSamples=[], qSettled=false;
 
 /* shared GLSL: value noise + fBm, used by both the sun and the surfaces */
 var NOISE =
@@ -490,12 +497,15 @@ function initGL(){
     " c*=limb; c=mix(c,c*vec3(1.05,0.62,0.30),1.0-limb);"+
     " gl_FragColor=vec4(c,1.0); }");
 
+  var DERIV = gl.getExtension('OES_standard_derivatives') ? "#extension GL_OES_standard_derivatives : enable\n" : "";
   PROG.planet = NX.program(gl,
     "attribute vec3 aP; attribute vec3 aN; uniform mat4 uMVP,uM;"+
     "varying vec3 vN; varying vec3 vW; varying vec3 vL;"+
     "void main(){ vec4 w=uM*vec4(aP,1.0); vW=w.xyz; vL=aP;"+
     " vN=normalize((uM*vec4(aN,0.0)).xyz); gl_Position=uMVP*vec4(aP,1.0); }",
-    "precision highp float; varying vec3 vN; varying vec3 vW; varying vec3 vL;"+
+    DERIV+"precision highp float;\n"+
+    (DERIV? "#define HAS_DERIV 1\n" : "")+
+    "varying vec3 vN; varying vec3 vW; varying vec3 vL;"+
     "uniform vec3 uC; uniform vec3 uEye; uniform float uE,uSeed,uBand,uSpin;"+NOISE+
     "void main(){"+
     /* surface: latitude bands for the gas-giant-ish bodies, blotches for the rest */
@@ -510,12 +520,29 @@ function initGL(){
     " alb=mix(alb,uC*1.25,smoothstep(0.80,0.97,blotch)*0.5);"+
     /* lighting from the sun at the origin */
     " vec3 N=normalize(vN); vec3 L=normalize(-vW); vec3 V=normalize(uEye-vW);"+
-    " float dif=max(dot(N,L),0.0);"+
-    " float wrap=max((dot(N,L)+0.28)/1.28,0.0);"+   /* soft terminator */
+    /* relief: bend the normal along the gradient of the surface pattern.
+       One screen-space derivative pair, no extra noise samples. */
+    "\n#ifdef HAS_DERIV\n"+
+    " vec3 dpx=dFdx(vW), dpy=dFdy(vW);"+
+    " float dsx=dFdx(s), dsy=dFdy(s);"+
+    " vec3 bump = (dsx*cross(N,dpy) - dsy*cross(N,dpx));"+
+    " float bl = length(bump);"+
+    " if(bl>0.0001) N = normalize(N - bump*(0.55/bl)*min(1.0,bl*90.0));"+
+    "\n#endif\n"+
+    " float ndl=dot(N,L);"+
+    " float dif=max(ndl,0.0);"+
+    " float wrap=max((ndl+0.30)/1.30,0.0);"+
     " float rim=pow(1.0-max(dot(N,V),0.0),2.8);"+
-    " float spec=pow(max(dot(reflect(-L,N),V),0.0),26.0)*0.22;"+
-    " vec3 c=alb*(0.10+0.55*wrap+0.55*dif)+vec3(1.0)*spec;"+
-    " c+=uC*rim*0.75;"+                              /* atmosphere on the limb */
+    /* two lobes: a broad sheen and a tight highlight, so it reads as a body
+       and not as a billiard ball */
+    " vec3 H=normalize(L+V);"+
+    " float sheen=pow(max(dot(N,H),0.0),9.0)*0.09;"+
+    " float spec =pow(max(dot(N,H),0.0),48.0)*0.20;"+
+    /* warm bounce right at the terminator, where a real surface reddens */
+    " float term=exp(-abs(ndl)*7.0)*0.30;"+
+    " vec3 c=alb*(0.085+0.50*wrap+0.60*dif)+vec3(1.0,0.96,0.90)*(spec+sheen);"+
+    " c+=mix(uC,vec3(1.0,0.55,0.30),0.6)*term;"+
+    " c+=uC*rim*0.70;"+
     " c+=alb*uE;"+
     " gl_FragColor=vec4(c,1.0); }");
 
@@ -526,6 +553,35 @@ function initGL(){
     "precision mediump float; varying vec2 vQ; uniform vec3 uC; uniform float uO,uPow;"+
     "void main(){ float r=length(vQ); if(r>1.0) discard;"+
     " float a=pow(max(0.0,1.0-r),uPow)*uO; gl_FragColor=vec4(uC*a,a); }");
+
+  /* a flat annulus, drawn facing the camera — marks whatever is in focus */
+  PROG.ring2d = NX.program(gl,
+    "attribute vec2 aQ; uniform mat4 uVP; uniform vec3 uCen,uR,uU; uniform float uS;"+
+    "varying vec2 vQ; void main(){ vQ=aQ; vec3 w=uCen+uR*(aQ.x*uS)+uU*(aQ.y*uS);"+
+    " gl_Position=uVP*vec4(w,1.0); }",
+    "precision mediump float; varying vec2 vQ; uniform vec3 uC; uniform float uO,uW;"+
+    "void main(){ float r=length(vQ); if(r>1.0) discard;"+
+    " float ring=smoothstep(1.0-uW*2.0,1.0-uW,r)*smoothstep(1.0,1.0-uW*0.55,r);"+
+    " float halo=pow(max(0.0,1.0-abs(r-0.78)/0.5),3.0)*0.28;"+
+    " float a=(ring+halo)*uO; gl_FragColor=vec4(uC*a,a); }");
+
+  /* the sun's corona: streamers that leave the limb and turn slowly */
+  PROG.corona = NX.program(gl,
+    "attribute vec2 aQ; uniform mat4 uVP; uniform vec3 uCen,uR,uU; uniform float uS;"+
+    "varying vec2 vQ; void main(){ vQ=aQ; vec3 w=uCen+uR*(aQ.x*uS)+uU*(aQ.y*uS);"+
+    " gl_Position=uVP*vec4(w,1.0); }",
+    "precision highp float; varying vec2 vQ; uniform float uT,uO; uniform vec3 uC;"+NOISE+
+    "void main(){ float r=length(vQ); if(r>1.0) discard;"+
+    " float a=atan(vQ.y,vQ.x)+uT*0.035;"+
+    " vec2 d=vec2(cos(a),sin(a));"+
+    " float n1=n3(vec3(d*2.6, uT*0.06));"+
+    " float n2=n3(vec3(d*7.0, uT*0.10+9.0));"+
+    " float streak=pow(max(0.0,n1*0.62+n2*0.38), 2.6);"+
+    /* the streamers reach further where the noise is strong, and fade out */
+    " float reach=0.34+0.62*streak;"+
+    " float radial=smoothstep(reach,0.24,r)*smoothstep(0.20,0.30,r);"+
+    " float v=streak*radial*uO;"+
+    " gl_FragColor=vec4(uC*v, v); }");
 
   BUF.quad = NX.buf(gl, new Float32Array([-1,-1, 1,-1, -1,1, 1,1]));
   GEO.sph = NX.sphere(32,48);
@@ -574,15 +630,15 @@ function buildStars(){
 var MW=[];
 function buildMilkyWay(){
   MW=[];
-  for(var i=0;i<16;i++){
-    var a=(i/16)*Math.PI*2 + Math.random()*0.25;
+  for(var i=0;i<10;i++){
+    var a=(i/10)*Math.PI*2 + Math.random()*0.28;
     var R=46+Math.random()*22;
     var tilt=0.32;
     var x=Math.cos(a)*R, z=Math.sin(a)*R;
     var y=-z*Math.sin(tilt)+ (Math.random()*2-1)*5.0;
     var warm=Math.random();
     MW.push({ p:[x, y, z*Math.cos(tilt)],
-              s:16+Math.random()*20,
+              s:14+Math.random()*15,
               c:[0.26+warm*0.30, 0.22+warm*0.14, 0.52+ (1-warm)*0.30],
               o:0.045+Math.random()*0.055 });
   }
@@ -722,11 +778,18 @@ function draw(now, dt){
   camState.az += (camState.tAz-camState.az)*Math.min(1,dt*7);
   camState.el += (camState.tEl-camState.el)*Math.min(1,dt*7);
   camState.dist += (camState.tDist-camState.dist)*Math.min(1,dt*5);
+  /* the look-at point eases toward whatever is in focus, so tapping a planet
+     flies to it instead of cutting, and letting go drifts back to the sun */
+  var tgt = focus ? focus.pos : [0,0,0];
+  var k = Math.min(1, dt*3.2);
+  camLook[0]+=(tgt[0]-camLook[0])*k; camLook[1]+=(tgt[1]-camLook[1])*k; camLook[2]+=(tgt[2]-camLook[2])*k;
   var ce=Math.cos(camState.el), se=Math.sin(camState.el);
-  eye[0]=Math.cos(camState.az)*ce*camState.dist;
-  eye[1]=se*camState.dist;
-  eye[2]=Math.sin(camState.az)*ce*camState.dist;
-  NX.lookAt(eye,[0,0,0],[0,1,0],mV);
+  eye[0]=camLook[0]+Math.cos(camState.az)*ce*camState.dist;
+  eye[1]=camLook[1]+se*camState.dist;
+  eye[2]=camLook[2]+Math.sin(camState.az)*ce*camState.dist;
+  shiftNow += (shiftTo-shiftNow)*Math.min(1,dt*3.2);
+  mP[9] = shiftNow;
+  NX.lookAt(eye,camLook,[0,1,0],mV);
   NX.mul(mP,mV,mVP);
   camRight[0]=mV[0]; camRight[1]=mV[4]; camRight[2]=mV[8];
   camUp[0]=mV[1];    camUp[1]=mV[5];    camUp[2]=mV[9];
@@ -740,7 +803,8 @@ function draw(now, dt){
   gl.drawArrays(gl.TRIANGLE_STRIP,0,4);
 
   gl.enable(gl.BLEND); gl.blendFunc(gl.ONE,gl.ONE);
-  MW.forEach(function(n){ glowQuad(n.p,n.s,n.c,n.o,1.5); });
+  for(var mi=0; mi<MW.length; mi++){ if(!QUAL && mi>=4) break;
+    var nb=MW[mi]; glowQuad(nb.p,nb.s,nb.c,nb.o,1.5); }
 
   gl.useProgram(PROG.star);
   gl.uniformMatrix4fv(PROG.star.u.uV,false,mV);
@@ -754,7 +818,8 @@ function draw(now, dt){
   gl.drawArrays(gl.POINTS,0,GEO.starN);
 
   var pulse=1+Math.sin(now/900)*0.045;
-  glowQuad([0,0,0], 10.4*pulse, [1.0,0.58,0.22], 0.40, 2.6);
+  if(QUAL) coronaQuad(6.6*SUN_R*pulse, [1.0,0.68,0.32], 0.55, now/1000);
+  glowQuad([0,0,0], 10.4*pulse, [1.0,0.58,0.22], QUAL?0.40:0.52, 2.6);
   glowQuad([0,0,0], 5.2*pulse,  [1.0,0.82,0.44], 0.85, 3.4);
   glowQuad([0,0,0], 2.3*pulse,  [1.0,0.94,0.72], 0.80, 5.0);
 
@@ -881,12 +946,45 @@ function draw(now, dt){
     glowQuad([al.pos[0],al.pos[1]-0.05,al.pos[2]], 0.50, [0.30,0.95,0.70], 0.34*f, 2.6);
     glowQuad([al.pos[0],al.pos[1]+0.05,al.pos[2]], 0.20, [0.60,1.0,0.85], 0.75*f, 3.4);
   });
+  /* whatever is in focus wears a ring, so the tap has an answer on screen */
+  if(focus){
+    var fp=1+Math.sin(now/420)*0.045;
+    ringQuad(focus.pos, focus.L.size*1.80*fp, [1.0,0.86,0.52], 0.80, 0.070);
+    ringQuad(focus.pos, focus.L.size*2.45*fp, [1.0,0.82,0.46], 0.16, 0.028);
+    glowQuad(focus.pos, focus.L.size*2.9, focus.col, 0.14, 2.2);
+  }
   gl.depthMask(true);
 }
 function bindAttr(loc,b,n){
   if(loc===undefined||loc<0) return;
   gl.bindBuffer(gl.ARRAY_BUFFER,b); gl.enableVertexAttribArray(loc);
   gl.vertexAttribPointer(loc,n,gl.FLOAT,false,0,0);
+}
+function ringQuad(cen,size,col,op,w){
+  gl.useProgram(PROG.ring2d);
+  gl.uniformMatrix4fv(PROG.ring2d.u.uVP,false,mVP);
+  gl.uniform3fv(PROG.ring2d.u.uCen,cen);
+  gl.uniform3fv(PROG.ring2d.u.uR,camRight);
+  gl.uniform3fv(PROG.ring2d.u.uU,camUp);
+  gl.uniform1f(PROG.ring2d.u.uS,size);
+  gl.uniform3fv(PROG.ring2d.u.uC,col);
+  gl.uniform1f(PROG.ring2d.u.uO,op);
+  gl.uniform1f(PROG.ring2d.u.uW,w);
+  bindAttr(PROG.ring2d.a.aQ,BUF.quad,2);
+  gl.drawArrays(gl.TRIANGLE_STRIP,0,4);
+}
+function coronaQuad(size,col,op,t){
+  gl.useProgram(PROG.corona);
+  gl.uniformMatrix4fv(PROG.corona.u.uVP,false,mVP);
+  gl.uniform3f(PROG.corona.u.uCen,0,0,0);
+  gl.uniform3fv(PROG.corona.u.uR,camRight);
+  gl.uniform3fv(PROG.corona.u.uU,camUp);
+  gl.uniform1f(PROG.corona.u.uS,size);
+  gl.uniform3fv(PROG.corona.u.uC,col);
+  gl.uniform1f(PROG.corona.u.uO,op);
+  gl.uniform1f(PROG.corona.u.uT,t);
+  bindAttr(PROG.corona.a.aQ,BUF.quad,2);
+  gl.drawArrays(gl.TRIANGLE_STRIP,0,4);
 }
 function glowQuad(cen,size,col,op,pw){
   gl.useProgram(PROG.glow);
@@ -915,7 +1013,7 @@ function buildLabels(){
     el.querySelector('.n span').textContent=b.def.name||b.def.id;
     el.querySelector('.v').textContent=b.def.val||'';
     el.style.borderColor='rgba('+Math.round(b.col[0]*255)+','+Math.round(b.col[1]*255)+','+Math.round(b.col[2]*255)+',.32)';
-    el.addEventListener('click',function(e){ e.stopPropagation(); openSystem(b.def); });
+    el.addEventListener('click',function(e){ e.stopPropagation(); focusOn(b); openSystem(b.def); });
     labWrap.appendChild(el); return el;
   });
 }
@@ -940,7 +1038,8 @@ function placeLabels(){
   var boxes=[]; labelBoxes=boxes; var used=new Array(bodies.length);
   list.forEach(function(o){
     var el=labEls[o.i], x=o.s.x;
-    var y=o.s.y + (o.s.y < H*0.52 ? -42 : 44);
+    var lift = (focus && bodies[o.i]===focus) ? 74 : 42;
+    var y=o.s.y + (o.s.y < H*0.52 ? -lift : lift+2);
     if(x<-40||x>W+40||y<-40||y>H+40) return;
     var w=el.offsetWidth||120, h=el.offsetHeight||40;
     x=Math.max(w/2+8, Math.min(W-w/2-8, x));
@@ -973,8 +1072,9 @@ function placeBubbles(){
         if(box.l<q.r&&box.r>q.l&&box.t<q.b&&box.b>q.t) hit=true; }
       if(!hit) break;
       y -= (h+12);
-      if(y < h/2+6){ y = h/2+6; break; }
+      if(y < h/2+6){ y = -999; break; }   /* nowhere clear: do not draw it */
     }
+    if(y < 0){ el.style.opacity='0'; continue; }
     el.style.left=x+'px'; el.style.top=y+'px';
     var fade=Math.min(1, Math.sin(Math.min(1,al.t)*Math.PI)*2.2);
     el.style.opacity=String(Math.max(0,Math.min(1,fade)));
@@ -1022,7 +1122,7 @@ function hit(px,py){
     var d=Math.hypot(px-s.x,py-s.y);
     if(d<rad && d<bd){ bd=d; best=b; }
   });
-  if(best) return openSystem(best.def);
+  if(best){ focusOn(best); return openSystem(best.def); }
   var ss=screenOf([0,0,0]);
   if(ss){ var rr=Math.max(46, SUN_R*k/Math.max(0.6,ss.w));
     if(Math.hypot(px-ss.x,py-ss.y)<rr) return setView('count'); }
@@ -1047,8 +1147,22 @@ document.querySelector('#shead .x').addEventListener('click',closeSheet);
     if(dy>60 || dy===0) closeSheet();
   });
 })();
+function focusOn(b){
+  focus=b;
+  shiftTo = (window.innerHeight>window.innerWidth) ? -0.38 : -0.12;
+  camState.tDist = 3.1 + b.L.size*7.5;
+  camState.tEl   = Math.max(0.34, Math.min(0.92, camState.tEl));
+  idleT = -6;                       /* hold still for six seconds, then drift */
+}
+function unfocus(){
+  if(!focus) return;
+  focus=null;
+  shiftTo = shiftBase;
+  camState.tDist = baseDist();
+  camState.tEl   = 0.86;
+}
 function openSheet(){ sheet.classList.add('open'); }
-function closeSheet(){ sheet.classList.remove('open'); if(view==='log') setView('now'); }
+function closeSheet(){ sheet.classList.remove('open'); unfocus(); if(view==='log') setView('now'); }
 function openSystem(p){
   sheadT.textContent=p.name||p.id;
   var c=stateHex(p.state);
@@ -1082,9 +1196,9 @@ function setView(v){
   document.getElementById('head').classList.toggle('hide',v!=='now');
   document.getElementById('big').classList.toggle('on',v==='count');
   document.getElementById('scrim').classList.toggle('on',v==='count');
-  if(v==='count'){ camState.tDist=10.5; camState.tEl=0.42; sheet.classList.remove('open'); }
-  else if(v==='log'){ camState.tDist=baseDist()+3.0; camState.tEl=1.05; openLog(); }
-  else { camState.tDist=baseDist(); camState.tEl=0.86; sheet.classList.remove('open'); }
+  if(v==='count'){ focus=null; shiftTo=shiftBase; camState.tDist=10.5; camState.tEl=0.42; sheet.classList.remove('open'); }
+  else if(v==='log'){ focus=null; shiftTo=shiftBase; camState.tDist=baseDist()+3.0; camState.tEl=1.05; openLog(); }
+  else { focus=null; shiftTo=shiftBase; camState.tDist=baseDist(); camState.tEl=0.86; sheet.classList.remove('open'); }
   measureHead();
 }
 
@@ -1260,6 +1374,16 @@ function askPin(){
 function loop(now){
   var dt=Math.min(0.05,(now-loop.t)/1000); loop.t=now;
   idleT+=dt;
+  if(!qSettled){
+    qSamples.push(dt);
+    if(qSamples.length>=90){
+      var sorted=qSamples.slice(10).sort(function(a,b){return a-b;});
+      var med=sorted[Math.floor(sorted.length/2)];
+      if(med>0.030){ QUAL=0; }
+      qSettled=true;
+      DIAG.step = 'איכות ' + (QUAL?'מלאה':'חסכונית') + ' · ' + Math.round(med*1000) + ' מ"ש לפריים';
+    }
+  }
   if(!drag&&!pinch&&idleT>3) camState.tAz+=dt*0.035;
   if(now-lastCour  > 1400){ lastCour=now;  spawnCourier(); }
   if(now-lastShip  > 9000){ lastShip=now;  spawnShip(); }
