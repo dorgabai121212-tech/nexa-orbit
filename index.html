@@ -52,7 +52,9 @@ canvas#sky{position:fixed;inset:0;width:100%;height:100%;display:block;z-index:0
 .lab .n i{width:7px;height:7px;border-radius:50%;display:inline-block;flex:none}
 .lab .v{font-size:11.5px;color:var(--dim);margin-top:3px;line-height:1.15;font-weight:600}
 .lab.off{opacity:0;pointer-events:none}
-.lab .n{font-size:13.5px}
+.lab .n{font-size:12.5px}
+.lab{padding:5px 9px 6px}
+.lab .v{font-size:11px;margin-top:2px}
 .bub{position:absolute;transform:translate(-50%,-50%);width:max-content;max-width:min(258px,70vw);
   padding:7px 11px 8px;border-radius:14px;font-size:12.5px;font-weight:700;line-height:1.35;
   background:rgba(6,20,16,.86);border:1px solid rgba(57,230,164,.42);color:#bdf6df;
@@ -402,16 +404,16 @@ var STORE_KEY = "nexa.pin.v1";
 
 /* geometry only — no words, so the hosted shell carries no content ---- */
 var LAYOUT = {
-  chain: { r:1.42, size:.360, speed:.055, tilt: .06, colour:"#ffd479", seed:1.3, band:0.15, ring:true, moons:1 },
-  code:  { r:1.80, size:.330, speed:.041, tilt:-.10, colour:"#6fb4ff", seed:3.7, band:0.10, moons:1 },
-  tests: { r:2.14, size:.305, speed:.030, tilt: .14, colour:"#39e6a4", seed:5.1, band:0.08 },
-  ci:    { r:2.46, size:.286, speed:.023, tilt:-.05, colour:"#b48cff", seed:7.9, band:0.55 },
-  prs:   { r:2.76, size:.268, speed:.018, tilt: .09, colour:"#ff9f43", seed:2.2, band:0.62, ring:true },
-  main:  { r:3.04, size:.252, speed:.014, tilt:-.12, colour:"#8fa6cf", seed:9.4, band:0.05, moons:1 },
-  spend: { r:3.30, size:.234, speed:.011, tilt: .17, colour:"#7de3ff", seed:4.4, band:0.20 },
-  eye:   { r:3.54, size:.222, speed:.009, tilt:-.16, colour:"#ff6fae", seed:6.6, band:0.30 }
+  chain: { r:1.84, size:.250, speed:.052, tilt: .20, colour:"#ffd479", seed:1.3, band:0.15, ring:true, moons:1 },
+  code:  { r:2.10, size:.232, speed:.041, tilt:-.34, colour:"#6fb4ff", seed:3.7, band:0.10, moons:1 },
+  tests: { r:2.36, size:.218, speed:.033, tilt: .40, colour:"#39e6a4", seed:5.1, band:0.08 },
+  ci:    { r:2.62, size:.205, speed:.026, tilt:-.16, colour:"#b48cff", seed:7.9, band:0.55 },
+  prs:   { r:2.88, size:.194, speed:.021, tilt: .30, colour:"#ff9f43", seed:2.2, band:0.62, ring:true },
+  main:  { r:3.12, size:.184, speed:.017, tilt:-.42, colour:"#8fa6cf", seed:9.4, band:0.05, moons:1 },
+  spend: { r:3.34, size:.174, speed:.013, tilt: .12, colour:"#7de3ff", seed:4.4, band:0.20 },
+  eye:   { r:3.56, size:.166, speed:.010, tilt:-.26, colour:"#ff6fae", seed:6.6, band:0.30 }
 };
-var SUN_R = 0.95;
+var SUN_R = 0.62;
 
 /* ---------------- the snapshot this file ships with ------------------ */
 var SNAP = { asOf:"", need:{level:"none",title:"NEXA",sub:""}, counter:{counted:0,target:100,verified:false,chainVerifies:false,attests:false,links:0,findings:0,struck:0}, systems:[], log:[] };
@@ -428,7 +430,7 @@ if(!gl){
 }
 
 var PROG={}, BUF={}, GEO={};
-var camState={az:-0.55,el:0.86,dist:13.3,tAz:-0.55,tEl:0.86,tDist:13.3};
+var camState={az:-0.55,el:0.78,dist:14.4,tAz:-0.55,tEl:0.78,tDist:14.4};
 var mP=NX.m4(), mV=NX.m4(), mVP=NX.m4(), mM=NX.m4(), mMVP=NX.m4();
 var eye=[0,0,0], camRight=[1,0,0], camUp=[0,1,0];
 var camLook=[0,0,0], focus=null;   /* what the camera is holding on to */
@@ -727,13 +729,13 @@ var ringBase=null, ringArc=null, ringPct=-1, ringVerified=null;
 function buildRing(pct, verified){
   if(pct===ringPct && verified===ringVerified) return;
   ringPct=pct; ringVerified=verified;
-  var R=1.24;
+  var R=0.84;
   if(!ringBase){
-    var g=NX.torusArc(R,0.015,Math.PI*2,150,7);
+    var g=NX.torusArc(R,0.010,Math.PI*2,150,7);
     ringBase={p:NX.buf(gl,g.pos), i:NX.buf(gl,g.idx,gl.ELEMENT_ARRAY_BUFFER), n:g.idx.length};
   }
   var arc=Math.max(0.02, Math.PI*2*pct);
-  var ga=NX.torusArc(R,0.050,arc,Math.max(10,Math.round(160*pct)),9);
+  var ga=NX.torusArc(R,0.026,arc,Math.max(10,Math.round(160*pct)),9);
   if(ringArc){ gl.deleteBuffer(ringArc.p); gl.deleteBuffer(ringArc.i); }
   ringArc={p:NX.buf(gl,ga.pos), i:NX.buf(gl,ga.idx,gl.ELEMENT_ARRAY_BUFFER), n:ga.idx.length};
 }
@@ -785,7 +787,7 @@ function refreshLinkGeometry(){
 /* The outer belt is the project's own history: one mark per phase, lit gold
    when that phase is finished and dim when it is not. Every phase that lands
    adds a light, so the system visibly grows outward as the work goes on. */
-var STAGE_R = 3.52, STAGE_TILT = 0.05;
+var STAGE_R = 3.86, STAGE_TILT = 0.05;
 function stages(){ return Array.isArray(D.stages) ? D.stages : []; }
 function drawStages(now){
   var st = stages(); if(!st.length) return;
@@ -818,7 +820,7 @@ function spawnCourier(){
 /* --- ships: they cross the field, they do not carry meaning --- */
 var ships=[], lastShip=0;
 function spawnShip(){
-  if(ships.length>2) return;
+  if(ships.length>3) return;
   /* the visible cone on an upright phone is roughly +-3.5 wide and +-7 tall
      at the sun's depth, so traffic has to fly inside that or it is invisible */
   var side=Math.random()<0.5?-1:1;
@@ -869,7 +871,7 @@ function resize(){
   mP[9] = portrait ? 0.20 : 0.06;
   camState.tDist = baseDist();
 }
-function baseDist(){ return window.innerHeight>window.innerWidth ? 13.3 : 10.9; }
+function baseDist(){ return window.innerHeight>window.innerWidth ? 14.4 : 11.6; }
 
 function draw(now, dt){
   camState.az += (camState.tAz-camState.az)*Math.min(1,dt*7);
@@ -920,10 +922,10 @@ function draw(now, dt){
   gl.drawArrays(gl.POINTS,0,GEO.starN);
 
   var pulse=1+Math.sin(now/900)*0.045;
-  if(QUAL) coronaQuad(6.6*SUN_R*pulse, [1.0,0.68,0.32], 0.26, now/1000);
-  glowQuad([0,0,0], 10.4*pulse, [1.0,0.58,0.22], QUAL?0.17:0.26, 2.6);
-  glowQuad([0,0,0], 5.2*pulse,  [1.0,0.82,0.44], 0.38, 3.4);
-  glowQuad([0,0,0], 2.3*pulse,  [1.0,0.94,0.72], 0.45, 5.0);
+  if(QUAL) coronaQuad(8.4*SUN_R*pulse, [1.0,0.68,0.32], 0.26, now/1000);
+  glowQuad([0,0,0], 7.4*pulse, [1.0,0.58,0.22], QUAL?0.17:0.26, 2.6);
+  glowQuad([0,0,0], 3.6*pulse,  [1.0,0.82,0.44], 0.38, 3.4);
+  glowQuad([0,0,0], 1.6*pulse,  [1.0,0.94,0.72], 0.45, 5.0);
 
   gl.enable(gl.DEPTH_TEST); gl.depthMask(false);
   gl.blendFunc(gl.SRC_ALPHA,gl.ONE_MINUS_SRC_ALPHA);
@@ -995,7 +997,7 @@ function draw(now, dt){
     gl.uniformMatrix4fv(PROG.solid.u.uMVP,false,mMVP);
     if(ringVerified) gl.uniform3f(PROG.solid.u.uC,1.0,0.83,0.47);
     else             gl.uniform3f(PROG.solid.u.uC,1.0,0.62,0.26);
-    gl.uniform1f(PROG.solid.u.uO, ringVerified?0.95:0.62);
+    gl.uniform1f(PROG.solid.u.uO, ringVerified?0.70:0.45);
     bindAttr(PROG.solid.a.aP,ringArc.p,3);
     gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER,ringArc.i);
     gl.drawElements(gl.TRIANGLES,ringArc.n,gl.UNSIGNED_SHORT,0);
@@ -1054,8 +1056,8 @@ function draw(now, dt){
   });
   aliens.forEach(function(al){
     var f=Math.sin(Math.min(1,al.t)*Math.PI);
-    glowQuad([al.pos[0],al.pos[1]-0.05,al.pos[2]], 0.50, [0.30,0.95,0.70], 0.34*f, 2.6);
-    glowQuad([al.pos[0],al.pos[1]+0.05,al.pos[2]], 0.20, [0.60,1.0,0.85], 0.75*f, 3.4);
+    glowQuad([al.pos[0],al.pos[1]-0.07,al.pos[2]], 0.78, [0.30,0.95,0.70], 0.48*f, 2.4);
+    glowQuad([al.pos[0],al.pos[1]+0.08,al.pos[2]], 0.30, [0.60,1.0,0.85], 0.95*f, 3.2);
   });
   /* whatever is in focus wears a ring, so the tap has an answer on screen */
   if(focus){
@@ -1207,6 +1209,7 @@ function placeLabels(){
 
 /* ---------------- touch ---------------- */
 function placeBubbles(){
+  var taken=[];
   for(var i=0;i<aliens.length;i++){
     var al=aliens[i], el=al.el; if(!el) continue;
     if(view!=='now'){ el.style.opacity='0'; continue; }
@@ -1221,7 +1224,9 @@ function placeBubbles(){
       if(headBox && box.l<headBox.r && box.r>headBox.l && box.t<headBox.b && box.b>headBox.t) hit=true;
       for(var k=0;!hit && k<labelBoxes.length;k++){ var q=labelBoxes[k];
         if(box.l<q.r&&box.r>q.l&&box.t<q.b&&box.b>q.t) hit=true; }
-      if(!hit) break;
+      for(var j=0;!hit && j<taken.length;j++){ var tb=taken[j];
+        if(box.l<tb.r&&box.r>tb.l&&box.t<tb.b&&box.b>tb.t) hit=true; }
+      if(!hit){ taken.push(box); break; }
       y -= (h+12);
       if(y < h/2+6){ y = -999; break; }   /* nowhere clear: do not draw it */
     }
@@ -1374,7 +1379,7 @@ function setView(v){
   document.getElementById('scrim').classList.toggle('on',v==='count');
   if(v==='count'){ focus=null; shiftTo=shiftBase; camState.tDist=10.5; camState.tEl=0.42; sheet.classList.remove('open'); }
   else if(v==='log'){ focus=null; shiftTo=shiftBase; camState.tDist=baseDist()+3.0; camState.tEl=1.05; openLog(); }
-  else { focus=null; shiftTo=shiftBase; camState.tDist=baseDist(); camState.tEl=0.86; sheet.classList.remove('open'); }
+  else { focus=null; shiftTo=shiftBase; camState.tDist=baseDist(); camState.tEl=0.78; sheet.classList.remove('open'); }
   measureHead();
 }
 
@@ -1562,8 +1567,8 @@ function loop(now){
   }
   if(!drag&&!pinch&&idleT>3) camState.tAz+=dt*0.035;
   if(now-lastCour  > 1400){ lastCour=now;  spawnCourier(); }
-  if(now-lastShip  > 9000){ lastShip=now;  spawnShip(); }
-  if(now-lastAlien >14000){ lastAlien=now; spawnAlien(); }
+  if(now-lastShip  > 5200){ lastShip=now;  spawnShip(); }
+  if(now-lastAlien > 8500){ lastAlien=now; spawnAlien(); }
 
   for(var si=ships.length-1; si>=0; si--){
     var sh=ships[si]; sh.t+=dt*sh.v;
