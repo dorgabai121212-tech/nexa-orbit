@@ -72,6 +72,39 @@ canvas#sky{position:fixed;inset:0;width:100%;height:100%;display:block;z-index:0
   transition:color .2s,background .2s,border-color .2s,transform .2s}
 #nav .tab.on{color:#07101f;background:linear-gradient(180deg,#ffe6ae,#ffcf74);border-color:transparent;transform:translateY(-2px)}
 #nav .tab:active{transform:scale(.95)}
+#nav .tab{padding:11px 14px}
+
+/* ---------- the brain view ----------
+   The same head as the board on the PC, points only: a phone gets the shape and
+   the tally, not a lit surface. Nothing here carries words of its own — every
+   name below arrives with the rest of the encrypted state. */
+#brain{position:absolute;inset-inline:0;bottom:calc(var(--sb) + 68px);z-index:5;
+  padding:0 14px;opacity:0;pointer-events:none;transition:opacity .4s;
+  max-height:52vh;overflow:auto;-webkit-overflow-scrolling:touch}
+#brain.on{opacity:1;pointer-events:auto}
+#brain .box{background:rgba(8,13,26,.86);backdrop-filter:blur(16px);-webkit-backdrop-filter:blur(16px);
+  border:1px solid rgba(255,255,255,.10);border-radius:18px;padding:13px 15px 14px}
+#brain .ttl{display:flex;align-items:baseline;gap:8px;font-size:12px;color:var(--dim)}
+#brain .ttl b{font-size:16px;color:var(--ink);font-weight:800}
+#brain .ttl .pc{margin-inline-start:auto;font-size:19px;font-weight:800;color:var(--ink);font-variant-numeric:tabular-nums}
+#brain .sum{font-size:12.5px;color:var(--dim);margin-top:5px;line-height:1.5}
+#brain .rows{margin-top:10px;display:flex;flex-direction:column;gap:7px}
+#brain .r .top{display:flex;align-items:center;gap:7px}
+#brain .r .dot{width:8px;height:8px;border-radius:50%;flex:0 0 auto;box-shadow:0 0 8px currentColor}
+#brain .r .nm{font-size:13px;font-weight:700;flex:1}
+#brain .r .ct{font-size:11.5px;color:var(--dim);font-variant-numeric:tabular-nums}
+#brain .r .bar{height:4px;border-radius:2px;background:rgba(255,255,255,.09);margin-top:4px;display:flex;overflow:hidden}
+#brain .r .bar i{display:block;height:100%;border-radius:2px}
+#brain .none{font-size:13px;color:var(--dim);line-height:1.6}
+#brain .none b{color:var(--ink)}
+/* A phone on its side has no room below anything. The panel becomes a column
+   down one edge and the head is pushed to the other, instead of the two of them
+   fighting over the same three hundred pixels. */
+@media (max-height:560px){
+  #brain{top:10px;bottom:calc(var(--sb) + 62px);left:10px;right:auto;width:46%;max-height:none;padding:0}
+  #brain .rows{gap:5px}
+  #brain .r .nm{font-size:12px}
+}
 
 #scrim{position:absolute;inset:0;opacity:0;transition:opacity .4s;pointer-events:none;background:radial-gradient(circle at 50% 47%,rgba(4,6,15,.52),rgba(4,6,15,.90) 72%)}
 #scrim.on{opacity:1}
@@ -185,7 +218,10 @@ canvas#sky{position:fixed;inset:0;width:100%;height:100%;display:block;z-index:0
   <button class="tab on" data-v="now">עכשיו</button>
   <button class="tab" data-v="count">המונה</button>
   <button class="tab" data-v="log">המסלול</button>
+  <button class="tab" data-v="brain">המוח</button>
 </div>
+
+<div id="brain"><div class="box"></div></div>
 <div id="stale"></div>
 <div id="sheet">
   <div id="grab"><i></i></div>
@@ -398,6 +434,266 @@ return { m4:m4, ident:ident, modelDir:modelDir, modelScale:modelScale, arc:arc, 
 
 </script>
 <script>
+/* ============================================================
+   NEXA brain — the geometry, on its own.
+
+   This file holds every part of the brain that is pure arithmetic: the
+   implicit field that defines the head, the fold field that wrinkles it, where
+   each kind of work sits, and the two expensive builds (the skin mesh and the
+   dust outline).  Nothing here touches the DOM or WebGL.
+
+   It is split out for one reason: building the mesh means ~19,000 surface
+   points, each found by marching a ray until the field flips sign.  Doing that
+   in the browser on every open costs about a second of a frozen page.  Because
+   this file is plain arithmetic it also runs under Node, so build.js can run
+   the same code once and bake the answer into the page.
+
+   Both callers get the SAME functions, so a baked page and a computed page are
+   the same picture — that is checked by comparing the two screenshots, not by
+   assuming it.
+   ============================================================ */
+(function (root, factory) {
+  var api = factory();
+  if (typeof module === 'object' && module.exports) module.exports = api;  /* build.js */
+  root.NXGEOM = api;                                                       /* the page */
+})(typeof globalThis !== 'undefined' ? globalThis : this, function () {
+  'use strict';
+
+  /* ---------- deterministic randomness: the same brain every time ---------- */
+  function hash(s){ var h=2166136261>>>0; for(var i=0;i<s.length;i++){ h^=s.charCodeAt(i); h=Math.imul(h,16777619)>>>0; } return h>>>0; }
+  function rng(seed){ var a=seed>>>0; return function(){ a=(a+0x6D2B79F5)>>>0; var t=a; t=Math.imul(t^(t>>>15),t|1); t^=t+Math.imul(t^(t>>>7),t|61); return ((t^(t>>>14))>>>0)/4294967296; }; }
+  function gauss(r){ var u=1-r(), v=r(); return Math.sqrt(-2*Math.log(u))*Math.cos(6.28318530718*v); }
+  function hex(c){ return [parseInt(c.substr(1,2),16)/255, parseInt(c.substr(3,2),16)/255, parseInt(c.substr(5,2),16)/255]; }
+
+  /* ---------- the shape of a brain, written as a test ----------
+     Two hemispheres with a fissure between them, a cerebellum tucked
+     under the back, and a stem going down. Anything that answers true
+     here is inside the head; everything drawn lives inside it.        */
+  function field(x,y,z){
+    /* Four parts, each written as "positive inside". A hard union of them leaves
+       creases where one part ends and the next begins, and a crease in a
+       ray-marched surface comes out as a giant flat facet. A soft union (log-sum-
+       exp) blends them the way a real cerebellum blends into a real cerebrum. */
+    var ax=Math.abs(x)-0.60, ty=y+0.46, tz=z-0.14;
+    var g0 = 1 - ((x*x)/1.0000 + ((y-0.12)*(y-0.12))/0.5929 + (z*z)/1.7956);              /* cerebrum   */
+    var g1 = 1 - ((ax*ax)/0.1024 + (ty*ty)/0.0729 + (tz*tz)/0.4225);                       /* temporal   */
+    var g2 = 1 - ((x*x)/0.3364 + ((y+0.60)*(y+0.60))/0.1296 + ((z+0.84)*(z+0.84))/0.2304); /* cerebellum */
+    var g3 = 1 - ((x*x)/0.0361 + ((y+0.68)*(y+0.68))/0.2500 + ((z+0.26)*(z+0.26))/0.0484); /* stem       */
+    var m=g0; if(g1>m)m=g1; if(g2>m)m=g2; if(g3>m)m=g3;
+    var k=7.6;
+    var G = m + Math.log(Math.exp(k*(g0-m))+Math.exp(k*(g1-m))+Math.exp(k*(g2-m))+Math.exp(k*(g3-m)))/k;
+    /* The groove down the middle is NOT carved here. Carving it makes the surface
+       stop being star-shaped about the origin, and a ray-marched star-shaped mesh
+       answers that with a sheet of stretched triangles across half the head. It is
+       drawn as shadow in the shader instead, where it costs nothing. */
+    return G;
+  }
+  function inBrain(x,y,z){ return field(x,y,z) > 0; }
+
+  /* ---------- where each kind of work lives ----------
+     Not decoration: the region is chosen for the domain it holds, so the
+     picture teaches the layout instead of hiding it.                    */
+  var ANCHOR = {
+    know: [0.52, 0.34, 0.74],   sig:0,
+    judg: [0.45,-0.24, 0.78],
+    act:  [0.50, 0.62, 0.06],
+    sens: [0.50, 0.28,-0.74],
+    mem:  [0.72,-0.30,-0.06],
+    voice:[0.62,-0.10, 0.44],
+    chk:  [0.30,-0.60,-0.86],
+    sec:  [0.22,-0.28,-0.26]
+  };
+  var SIGMA = { know:.27, judg:.22, act:.25, sens:.27, mem:.24, voice:.15, chk:.21, sec:.17 };
+
+  /* the domain a point of skin belongs to — nearest anchor, mirrored per side */
+  function domainAt(x,y,z){
+    var k='know', bd=1e9, sx=(x<0?-1:1);
+    for(var d in SIGMA){
+      var a=ANCHOR[d];
+      var ex=x-sx*a[0], ey=y-a[1], ez=z-a[2], dd=ex*ex+ey*ey+ez*ez;
+      if(d==='voice' && x>0) dd+=4;
+      if(dd<bd){ bd=dd; k=d; }
+    }
+    return k;
+  }
+
+  function place(cell,i){
+    var a=ANCHOR[cell.dom]||[0,0,0], s=SIGMA[cell.dom]||0.2;
+    var side = (cell.dom==='voice') ? -1 : ((i%2)?-1:1);
+    var r=rng(hash(cell.id)+7);
+    for(var k=0;k<500;k++){
+      var p=[ side*a[0]+gauss(r)*s, a[1]+gauss(r)*s*0.82, a[2]+gauss(r)*s ];
+      if(inBrain(p[0],p[1],p[2]) && inBrain(p[0]*1.06,p[1]*1.06,p[2]*1.06)) return p;
+    }
+    return [side*a[0], a[1], a[2]];
+  }
+
+  /* ---------- the outline: the shape of the head, drawn as dust ---------- */
+  function buildShell(){
+    var SHELL=[];
+    var r=rng(20101), want=2600, guard=0;
+    while(SHELL.length<want && guard++<1600000){
+      var x=(r()*2-1)*1.18, y=-1.16+r()*2.20, z=(r()*2-1)*1.52;
+      if(!inBrain(x,y,z)) continue;
+      if(inBrain(x*1.030,y*1.030,z*1.030)) continue;        /* keep only the skin */
+      /* gyri: a fold field. Ridges get the light, sulci stay dark — that is the
+         whole difference between a wrinkled organ and a boiled egg. */
+      var f = Math.sin(x*9.0+Math.sin(z*3.4)*1.7)*Math.sin(z*7.6+y*2.3) + Math.sin(y*11.0+x*2.6)*0.62;
+      if(r() > 0.30+0.70*Math.pow((f+1.7)/3.4,1.8)) continue;   /* thin out the valleys */
+      var push=1+0.048*f;
+      SHELL.push({x:x*push, y:y*push, z:z*push, dom:domainAt(x,y,z), f:(f+1.7)/3.4});
+    }
+    return SHELL;
+  }
+
+  /* ---------- the surface itself ----------
+     `inBrain` is a yes/no test, so the skin is found by walking outward along
+     each direction until the answer flips.  The furthest crossing is taken, which
+     is what puts the cerebellum on the outside instead of hiding it under the
+     cerebrum.  Then the fold field displaces it, and the normals are rebuilt from
+     the displaced positions — otherwise the gyri would be a paint job with no
+     light in them.                                                            */
+  function fold(x,y,z){
+    /* Gyri are about a tenth of the head across, so the loud octave has to be the
+       middle one. A field that is mostly low-frequency gives a smooth loaf no
+       matter how much light is thrown at it. */
+    return 0.32*Math.sin(x*5.4+Math.sin(z*2.6)*1.4)*Math.sin(z*4.8+y*1.7)
+         + 1.10*Math.sin(x*12.5+Math.sin(y*4.0)*1.1)*Math.sin(z*11.0+x*2.0)
+         + 0.62*Math.sin(y*14.0+z*3.0)*Math.sin(x*13.0+y*1.5)
+         + 0.30*Math.sin(z*21.0+y*5.0)*Math.sin(x*19.0);
+  }
+
+  var NU=176, NV=108;
+
+  /* the triangle list depends only on the grid size, so it is rebuilt rather
+     than baked — two nested loops are far cheaper than carrying 228 KB. */
+  function meshIndex(){
+    var idxArr=new Uint16Array(NU*NV*6), w=0;
+    for(var v=0;v<NV;v++) for(var u=0;u<NU;u++){
+      var a2=v*(NU+1)+u, b2=a2+NU+1;
+      idxArr[w++]=a2; idxArr[w++]=b2; idxArr[w++]=a2+1;
+      idxArr[w++]=b2; idxArr[w++]=b2+1; idxArr[w++]=a2+1;
+    }
+    return idxArr;
+  }
+
+  function buildMesh(){
+    var np=(NU+1)*(NV+1);
+    var pos=new Float32Array(np*3), nrm=new Float32Array(np*3), fld=new Float32Array(np);
+    var dirs=new Float32Array(np*3), dm=new Array(np);
+    var i=0;
+    for(var v=0;v<=NV;v++){
+      var th=(v/NV)*Math.PI, st=Math.sin(th), ct=Math.cos(th);
+      for(var u=0;u<=NU;u++){
+        var ph=(u/NU)*Math.PI*2;
+        var dx=st*Math.cos(ph), dy=ct, dz=st*Math.sin(ph);
+        /* walk out, remember the last radius that was still inside */
+        var last=0.06, r=0.06;
+        while(r<1.80){ if(field(dx*r,dy*r,dz*r)>0) last=r; r+=0.010; }
+        /* refine that crossing */
+        var lo=last, hi=last+0.010;
+        for(var b=0;b<16;b++){ var mid=(lo+hi)/2; if(field(dx*mid,dy*mid,dz*mid)>0) lo=mid; else hi=mid; }
+        var R=lo, f=fold(dx*R,dy*R,dz*R);
+        R*= 1+0.052*f;
+        fld[i]=Math.max(0,Math.min(1,(f+1.9)/3.8));
+        dirs[i*3]=dx; dirs[i*3+1]=dy; dirs[i*3+2]=dz;
+        pos[i*3]=dx*R; pos[i*3+1]=dy*R; pos[i*3+2]=dz*R;
+        dm[i]=domainAt(dx*R, dy*R, dz*R);   /* which kind of work owns this patch */
+        i++;
+      }
+    }
+    /* normals from the displaced grid, so a ridge actually catches the light */
+    function P(u,v,o){ var j=(v*(NU+1)+((u+NU+1)%(NU+1)))*3; o[0]=pos[j]; o[1]=pos[j+1]; o[2]=pos[j+2]; return o; }
+    var A=[0,0,0],Bp=[0,0,0],Cp=[0,0,0];
+    for(v=0;v<=NV;v++) for(u=0;u<=NU;u++){
+      var idx=v*(NU+1)+u;
+      P(u+1,v,A); P(u-1,v,Bp);
+      var t1=[A[0]-Bp[0],A[1]-Bp[1],A[2]-Bp[2]];
+      P(u,Math.min(NV,v+1),A); P(u,Math.max(0,v-1),Cp);
+      var t2=[A[0]-Cp[0],A[1]-Cp[1],A[2]-Cp[2]];
+      var nx=t1[1]*t2[2]-t1[2]*t2[1], ny=t1[2]*t2[0]-t1[0]*t2[2], nz=t1[0]*t2[1]-t1[1]*t2[0];
+      var L=Math.hypot(nx,ny,nz)||1; nx/=L; ny/=L; nz/=L;
+      /* point it outward: the grid winding flips across the poles */
+      if(nx*dirs[idx*3]+ny*dirs[idx*3+1]+nz*dirs[idx*3+2] < 0){ nx=-nx; ny=-ny; nz=-nz; }
+      nrm[idx*3]=nx; nrm[idx*3+1]=ny; nrm[idx*3+2]=nz;
+    }
+    return { pos:pos, nrm:nrm, col:new Float32Array(np*3), fld:fld, dom:dm,
+             idx:meshIndex(), n:np, ni:NU*NV*6 };
+  }
+
+  /* ---------- baking ----------
+     The blob carries raw little-endian float32, base64-encoded.  No quantising:
+     a rounded position is a different picture, and the whole point of the bake
+     is that it is not a different picture.  `col` is left out because the page
+     fills it from BRAIN.json anyway, and `idx` is left out because it is two
+     loops.  DOM_KEYS is written into the blob so a renamed domain cannot
+     silently shift every patch of skin to the wrong colour. */
+  var DOM_KEYS = Object.keys(SIGMA);
+
+  function b64enc(view){
+    var u8 = new Uint8Array(view.buffer, view.byteOffset, view.byteLength);
+    if (typeof Buffer !== 'undefined') return Buffer.from(u8).toString('base64');
+    var s=''; for(var i=0;i<u8.length;i++) s+=String.fromCharCode(u8[i]);
+    return btoa(s);
+  }
+  function b64dec(str, Type){
+    var bin = atob(str), n = bin.length, u8 = new Uint8Array(n);
+    for (var i=0;i<n;i++) u8[i] = bin.charCodeAt(i);
+    return new Type(u8.buffer);
+  }
+
+  function bake(){
+    var mesh = buildMesh(), shell = buildShell();
+    var sxyz = new Float32Array(shell.length*4), sdom = new Uint8Array(shell.length);
+    for (var i=0;i<shell.length;i++){
+      sxyz[i*4]=shell[i].x; sxyz[i*4+1]=shell[i].y; sxyz[i*4+2]=shell[i].z; sxyz[i*4+3]=shell[i].f;
+      var d = DOM_KEYS.indexOf(shell[i].dom); sdom[i] = d<0 ? 0 : d;
+    }
+    var mdom = new Uint8Array(mesh.n);
+    for (i=0;i<mesh.n;i++){ var k = DOM_KEYS.indexOf(mesh.dom[i]); mdom[i] = k<0 ? 0 : k; }
+    return { v:1, nu:NU, nv:NV, keys:DOM_KEYS,
+             pos:b64enc(mesh.pos), nrm:b64enc(mesh.nrm), fld:b64enc(mesh.fld), mdom:b64enc(mdom),
+             sn:shell.length, sxyz:b64enc(sxyz), sdom:b64enc(sdom) };
+  }
+
+  /* A blob from a different grid or a different domain list is refused rather
+     than reinterpreted — a wrong picture that loads is worse than a slow one. */
+  function bakeUsable(b){
+    if (!b || b.v!==1 || b.nu!==NU || b.nv!==NV) return false;
+    if (!b.keys || b.keys.length!==DOM_KEYS.length) return false;
+    for (var i=0;i<DOM_KEYS.length;i++) if (b.keys[i]!==DOM_KEYS[i]) return false;
+    return true;
+  }
+
+  function unbakeMesh(b){
+    var np=(NU+1)*(NV+1);
+    var pos=b64dec(b.pos,Float32Array), nrm=b64dec(b.nrm,Float32Array), fld=b64dec(b.fld,Float32Array);
+    var mdom=b64dec(b.mdom,Uint8Array);
+    if (pos.length!==np*3 || nrm.length!==np*3 || fld.length!==np || mdom.length!==np)
+      throw new Error('baked mesh is the wrong size');
+    var dom=new Array(np);
+    for (var i=0;i<np;i++) dom[i]=b.keys[mdom[i]];
+    return { pos:pos, nrm:nrm, col:new Float32Array(np*3), fld:fld, dom:dom,
+             idx:meshIndex(), n:np, ni:NU*NV*6 };
+  }
+
+  function unbakeShell(b){
+    var xyz=b64dec(b.sxyz,Float32Array), sdom=b64dec(b.sdom,Uint8Array), out=[];
+    if (sdom.length!==b.sn || xyz.length!==b.sn*4) throw new Error('baked shell is the wrong size');
+    for (var i=0;i<b.sn;i++)
+      out.push({ x:xyz[i*4], y:xyz[i*4+1], z:xyz[i*4+2], dom:b.keys[sdom[i]], f:xyz[i*4+3] });
+    return out;
+  }
+
+  return { hash:hash, rng:rng, gauss:gauss, hex:hex,
+           field:field, inBrain:inBrain, fold:fold, domainAt:domainAt,
+           ANCHOR:ANCHOR, SIGMA:SIGMA, DOM_KEYS:DOM_KEYS, place:place,
+           NU:NU, NV:NV, buildShell:buildShell, buildMesh:buildMesh,
+           bake:bake, bakeUsable:bakeUsable, unbakeMesh:unbakeMesh, unbakeShell:unbakeShell };
+});
+
+</script>
+<script>
 /* =====================================================================
    NEXA phone. Three questions, nothing else:
      1. do they need me right now?   2. where is the counter?
@@ -425,7 +721,52 @@ var LAYOUT = {
 var SUN_R = 0.62;
 
 /* ---------------- the snapshot this file ships with ------------------ */
-var SNAP = { asOf:"", need:{level:"none",title:"NEXA",sub:""}, counter:{counted:0,target:100,verified:false,chainVerifies:false,attests:false,links:0,findings:0,struck:0}, systems:[], log:[] };
+var SNAP = /*__SNAP__*/{
+  asOf: "2026-08-12T03:05:00+03:00",
+  need: { level:"none", title:"לא צריכים אותך",
+    sub:"מבחן המאה נגמר ואומת. קלוד קוד רץ על השלב הבא. אין שום דבר שממתין לך." },
+  counter: { counted:100, target:100, verified:true, chainVerifies:true, attests:true,
+             links:221, findings:0, struck:3, at:"02:21" },
+  systems: [
+    { id:"chain", name:"השרשרת", val:"221 חוליות · מאמתת", state:"ok",
+      rows:[["נספרו","100 מתוך 100"],["מאמתת את עצמה","כן"],["מעידה על הסדר","כן"],
+            ["ממצאים","0"],["ישיבות פסולות","3 — מסומנות, לא נספרות"]],
+      note:"זאת הראיה עצמה. כל ריצה שנספרה הוסיפה חוליה חתומה, וכל חוליה מעידה שהאישור שלך קדם לפעולה — לא כשדה שאומר זאת, אלא כטביעה שאי אפשר לייצר בדיעבד." },
+    { id:"code", name:"קלוד קוד", val:"עובד · שלב 2f-1", state:"ok",
+      rows:[["מצב","רץ מאז 03:00"],["השלב","2f-1"],["המשימה","לאמת את המאה מהראיות, לסגור את הפער האחרון, ולכתוב את קובץ המצב לפלאפון"],["מיזוג","אסור"]],
+      note:"נמדד מיומן הראנר, לא מרשימת התהליכים. חלון פתוח הוא לא עבודה." },
+    { id:"tests", name:"הבדיקות", val:"1170 עוברות", state:"ok",
+      rows:[["עוברות","1170"],["מדולגות","7"],["נמחקו","0"],["רצו גם בסביבה שלך","כן"]],
+      note:"בדיקה שמעולם לא נראתה נכשלת היא טענה, לא ראיה. לכן שוברים את הקוד בכוונה וסופרים מי שם לב." },
+    { id:"ci", name:"הבנייה בענן", val:"הריצה האחרונה עברה", state:"ok",
+      rows:[["תוצאה","success"],["שתי המשימות","עברו"],["מוזג משהו?","לא"]],
+      note:"נבדק מול קובץ הריצות האמיתי, לא מהדוח שכתב מי שביצע את העבודה." },
+    { id:"prs", name:"בקשות פתוחות", val:"63 · כולן טיוטה", state:"watch",
+      rows:[["פתוחות","63"],["מתוכן טיוטה","63"],["נמחקו או מוזגו","0"]],
+      note:"ערמה שגדלה. לא שבורה — אבל היא ההחלטה הבאה שלך, ואתה תקבל אותה ער." },
+    { id:"main", name:"הענף הראשי", val:"נעול · 24c8a506", state:"ok",
+      rows:[["מזהה","24c8a506"],["מוזג משהו?","לא"],["נעול בכוונה","כן"]],
+      note:"המאה היא שער שנפתח, לא רשות למזג. ההחלטה הזאת שלך." }
+  ],
+  log: [
+    { t:"03:00", k:"b", h:"קלוד קוד יצא לשלב 2f-1",
+      p:"שלוש מטלות: לאמת את המאה מהראיות בעצמו, לסגור את הפער האחרון שהוא עצמו הודה בו, ולכתוב את קובץ הנתונים שמזין את המסך הזה." },
+    { t:"02:21", k:"g", h:"מאה. אומת מול השרשרת",
+      p:"counted: 100 · chain_verifies: true · chain_attests_its_ordering: true · findings ריק. שלוש הישיבות הפסולות מסומנות בנפרד ולא תרמו אף ריצה." },
+    { t:"02:15", k:"g", h:"96 במונה",
+      p:"אחת עשרה ריצות. שלוש מלכודות סורבו נכון. אחת ירדה כי נכתבה המילה מהמסך הקודם — עצירה נקייה, בלי פסילה." },
+    { t:"01:53", k:"g", h:"89 במונה",
+      p:"תשעים ריצות ברצף בלי פסילה אחת, אחרי שהכלל התהפך: קודם התיקייה, אחר כך השמות." },
+    { t:"01:40", k:"g", h:"חדר הבקרה תוקן בשורש",
+      p:"הרובוטים הפסיקו לרוץ כשאף אחד לא עובד, והשעון הפסיק להמציא אלף שעות. הלוח כבר לא כותב הוראות — הוא מחשב אותן ממה שנמדד." },
+    { t:"00:06", k:"r", h:"שלוש ישיבות נפסלו",
+      p:"מלכודת תשומת לב אושרה. הישיבה כולה נמחקת, מה שנצבר לפניה נשאר. זאת בדיוק הסיבה שהמאה הזאת שווה משהו." },
+    { t:"אתמול 21:19", k:"g", h:"שלב 2e-10 הסתיים",
+      p:"השרשרת יודעת עכשיו להעיד על סדר הפעולות. לפני זה מאה ריצות תקינות ומאה ריצות הפוכות היו נראות בדיוק אותו דבר." },
+    { t:"אתמול 13:09", k:"g", h:"שלב 2e-9 אושר",
+      p:"שברו את הקוד פעמיים בכוונה וספרו מי שם לב: 10 בדיקות ואז 12. ככה טענה הופכת לראיה." }
+  ]
+}/*__ENDSNAP__*/;
 var D = SNAP;
 
 /* ---------------- WebGL ---------------- */
@@ -444,6 +785,7 @@ var mP=NX.m4(), mV=NX.m4(), mVP=NX.m4(), mM=NX.m4(), mMVP=NX.m4();
 var eye=[0,0,0], camRight=[1,0,0], camUp=[0,1,0];
 var camLook=[0,0,0], focus=null;   /* what the camera is holding on to */
 var shiftNow=0.20, shiftTo=0.20, shiftBase=0.20;  /* off-axis framing */
+var shiftX=0;                                     /* the same, sideways — brain view only */
 var W=1,H=1,DPR=1,FOV=1.0;
 /* Quality is measured, not assumed. The first ninety frames are timed on the
    actual device; if the median frame is slower than 30ms the expensive
@@ -898,6 +1240,11 @@ function draw(now, dt){
   eye[2]=camLook[2]+Math.sin(camState.az)*ce*camState.dist;
   shiftNow += (shiftTo-shiftNow)*Math.min(1,dt*3.2);
   mP[9] = shiftNow;
+  /* the sideways twin of shiftNow: only the brain view uses it, to get the head
+     out from behind the panel when the phone is on its side. It is written every
+     frame, including the zero, so it cannot leak into another view. */
+  shiftX += ((view==='brain' ? brainFrame().x : 0) - shiftX)*Math.min(1,dt*3.2);
+  mP[8] = shiftX;
   NX.lookAt(eye,camLook,[0,1,0],mV);
   NX.mul(mP,mV,mVP);
   camRight[0]=mV[0]; camRight[1]=mV[4]; camRight[2]=mV[8];
@@ -931,153 +1278,11 @@ function draw(now, dt){
   bindAttr(PROG.star.a.aC,BUF.starC,3);
   gl.drawArrays(gl.POINTS,0,GEO.starN);
 
-  var pulse=1+Math.sin(now/900)*0.045;
-  if(QUAL) coronaQuad(8.4*SUN_R*pulse, [1.0,0.68,0.32], 0.26, now/1000);
-  glowQuad([0,0,0], 7.4*pulse, [1.0,0.58,0.22], QUAL?0.17:0.26, 2.6);
-  glowQuad([0,0,0], 3.6*pulse,  [1.0,0.82,0.44], 0.38, 3.4);
-  glowQuad([0,0,0], 1.6*pulse,  [1.0,0.94,0.72], 0.45, 5.0);
-
-  gl.enable(gl.DEPTH_TEST); gl.depthMask(false);
-  gl.blendFunc(gl.SRC_ALPHA,gl.ONE_MINUS_SRC_ALPHA);
-  gl.useProgram(PROG.solid);
-  gl.uniformMatrix4fv(PROG.solid.u.uMVP,false,mVP);
-  bodies.forEach(function(b){
-    gl.uniform3fv(PROG.solid.u.uC,b.col);
-    gl.uniform1f(PROG.solid.u.uO,0.13);
-    bindAttr(PROG.solid.a.aP,b.orbit,3);
-    gl.drawArrays(gl.LINE_LOOP,0,140);
-  });
-
-  if(stages().length){
-    if(BUF.stageRingR !== beltR()){ if(BUF.stageRing) gl.deleteBuffer(BUF.stageRing);
-      BUF.stageRingR = beltR(); BUF.stageRing = NX.buf(gl, NX.circle(BUF.stageRingR,150,STAGE_TILT)); }
-    gl.uniform3f(PROG.solid.u.uC, 0.85,0.72,0.42);
-    gl.uniform1f(PROG.solid.u.uO, 0.10);
-    bindAttr(PROG.solid.a.aP, BUF.stageRing, 3);
-    gl.drawArrays(gl.LINE_LOOP,0,150);
-  }
-
-  /* the links themselves stay almost invisible on purpose */
-  for(var li=0; li<links.length; li++){
-    var L=links[li]; if(!L.buf) continue;
-    gl.uniform3fv(PROG.solid.u.uC, L.col);
-    gl.uniform1f(PROG.solid.u.uO, 0.18);
-    bindAttr(PROG.solid.a.aP, L.buf, 3);
-    gl.drawArrays(gl.LINE_STRIP, 0, L.n+1);
-  }
-
-  /* a short wake behind each planet */
-  bodies.forEach(function(b){
-    if(b.trail.length<6) return;
-    var arr=new Float32Array(b.trail.length*3);
-    for(var i=0;i<b.trail.length;i++){ arr[i*3]=b.trail[i][0]; arr[i*3+1]=b.trail[i][1]; arr[i*3+2]=b.trail[i][2]; }
-    gl.bindBuffer(gl.ARRAY_BUFFER, BUF.dyn);
-    gl.bufferData(gl.ARRAY_BUFFER, arr, gl.DYNAMIC_DRAW);
-    gl.enableVertexAttribArray(PROG.solid.a.aP);
-    gl.vertexAttribPointer(PROG.solid.a.aP,3,gl.FLOAT,false,0,0);
-    gl.uniform3fv(PROG.solid.u.uC,b.col);
-    gl.uniform1f(PROG.solid.u.uO,0.22);
-    gl.drawArrays(gl.LINE_STRIP,0,b.trail.length);
-  });
-  gl.depthMask(true);
-
-  gl.disable(gl.BLEND);
-  gl.useProgram(PROG.sun);
-  NX.model(0,0,0, now/9000, SUN_R, 0, mM);
-  NX.mul(mVP,mM,mMVP);
-  gl.uniformMatrix4fv(PROG.sun.u.uMVP,false,mMVP);
-  gl.uniform1f(PROG.sun.u.uT, now/1000);
-  gl.uniform3f(PROG.sun.u.uEyeL, eye[0]/SUN_R, eye[1]/SUN_R, eye[2]/SUN_R);
-  bindAttr(PROG.sun.a.aP,BUF.sphP,3);
-  gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER,BUF.sphI);
-  gl.drawElements(gl.TRIANGLES,GEO.sphCount,gl.UNSIGNED_SHORT,0);
-
-  gl.enable(gl.BLEND); gl.blendFunc(gl.SRC_ALPHA,gl.ONE_MINUS_SRC_ALPHA);
-  gl.useProgram(PROG.solid);
-  NX.model(0,0,0, 0, 1, 0, mM); NX.mul(mVP,mM,mMVP);
-  gl.uniformMatrix4fv(PROG.solid.u.uMVP,false,mMVP);
-  if(ringBase){
-    gl.uniform3f(PROG.solid.u.uC,0.16,0.22,0.36); gl.uniform1f(PROG.solid.u.uO,0.9);
-    bindAttr(PROG.solid.a.aP,ringBase.p,3);
-    gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER,ringBase.i);
-    gl.drawElements(gl.TRIANGLES,ringBase.n,gl.UNSIGNED_SHORT,0);
-  }
-  if(ringArc){
-    gl.blendFunc(gl.ONE,gl.ONE);
-    NX.model(0,0,0, now/26000, 1, 0, mM); NX.mul(mVP,mM,mMVP);
-    gl.uniformMatrix4fv(PROG.solid.u.uMVP,false,mMVP);
-    if(ringVerified) gl.uniform3f(PROG.solid.u.uC,1.0,0.83,0.47);
-    else             gl.uniform3f(PROG.solid.u.uC,1.0,0.62,0.26);
-    gl.uniform1f(PROG.solid.u.uO, ringVerified?0.70:0.45);
-    bindAttr(PROG.solid.a.aP,ringArc.p,3);
-    gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER,ringArc.i);
-    gl.drawElements(gl.TRIANGLES,ringArc.n,gl.UNSIGNED_SHORT,0);
-  }
-
-  gl.disable(gl.BLEND);
-  gl.useProgram(PROG.planet);
-  gl.uniform3fv(PROG.planet.u.uEye,eye);
-  bindAttr(PROG.planet.a.aP,BUF.sphP,3);
-  bindAttr(PROG.planet.a.aN,BUF.sphN,3);
-  gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER,BUF.sphI);
-  bodies.forEach(function(b){
-    b.ang += dt*b.L.speed; b.spin += dt*0.16;
-    var R=b.L.r, ct=Math.cos(b.L.tilt), st=Math.sin(b.L.tilt);
-    var x=Math.cos(b.ang)*R, z0=Math.sin(b.ang)*R;
-    b.pos[0]=x; b.pos[1]=-z0*st; b.pos[2]=z0*ct;
-    b.trailT=(b.trailT||0)+dt;
-    if(b.trailT>0.08){ b.trailT=0;
-      b.trail.push([b.pos[0],b.pos[1],b.pos[2]]);
-      if(b.trail.length>26) b.trail.shift(); }
-    NX.model(b.pos[0],b.pos[1],b.pos[2], 0, b.L.size, 0, mM);
-    NX.mul(mVP,mM,mMVP);
-    gl.uniformMatrix4fv(PROG.planet.u.uMVP,false,mMVP);
-    gl.uniformMatrix4fv(PROG.planet.u.uM,false,mM);
-    gl.uniform3fv(PROG.planet.u.uC,b.col);
-    gl.uniform1f(PROG.planet.u.uE,0.055);
-    gl.uniform1f(PROG.planet.u.uSeed,b.L.seed);
-    gl.uniform1f(PROG.planet.u.uBand,b.L.band);
-    gl.uniform1f(PROG.planet.u.uSpin,b.spin);
-    gl.drawElements(gl.TRIANGLES,GEO.sphCount,gl.UNSIGNED_SHORT,0);
-  });
-
-  gl.enable(gl.BLEND); gl.blendFunc(gl.ONE,gl.ONE); gl.depthMask(false);
-  drawStages(now);
-  bodies.forEach(function(b){
-    glowQuad(b.pos, b.L.size*2.6, b.col, 0.13, 2.9);
-    var f=0.30+0.26*Math.abs(Math.sin(now/700+b.L.r));
-    glowQuad(b.pos, b.L.size*1.35, b.pip, f, 3.6);
-  });
-  for(var i=couriers.length-1;i>=0;i--){
-    var c=couriers[i]; c.t+=dt*c.v;
-    if(c.t>=1){ couriers.splice(i,1); continue; }
-    var p, cc;
-    if(c.link){ p=NX.arcAt(c.link.a.pos, c.link.b.pos, c.link.bow, c.t); cc=c.link.a.col; }
-    else { p=[c.b.pos[0]*c.t, c.b.pos[1]*c.t+Math.sin(c.t*Math.PI)*0.45, c.b.pos[2]*c.t]; cc=c.b.col; }
-    var f=Math.sin(c.t*Math.PI);
-    glowQuad(p, 0.46, cc, f*0.95, 2.2);
-    glowQuad(p, 0.17, [1,1,1], f*0.95, 3.4);
-  }
-  ships.forEach(function(sh){
-    var back=[sh.pos[0]-sh.dir[0]*0.17, sh.pos[1]-sh.dir[1]*0.17, sh.pos[2]-sh.dir[2]*0.17];
-    glowQuad(back, 0.24, sh.glow, 0.60, 2.8);
-    glowQuad(back, 0.11, [0.85,0.95,1.0], 0.90, 3.8);
-    glowQuad([sh.pos[0]-sh.dir[0]*0.45, sh.pos[1]-sh.dir[1]*0.45, sh.pos[2]-sh.dir[2]*0.45],
-             0.34, sh.glow, 0.13, 2.0);
-  });
-  aliens.forEach(function(al){
-    var f=Math.sin(Math.min(1,al.t)*Math.PI);
-    glowQuad([al.pos[0],al.pos[1]-0.07,al.pos[2]], 0.78, [0.30,0.95,0.70], 0.48*f, 2.4);
-    glowQuad([al.pos[0],al.pos[1]+0.08,al.pos[2]], 0.30, [0.60,1.0,0.85], 0.95*f, 3.2);
-  });
-  /* whatever is in focus wears a ring, so the tap has an answer on screen */
-  if(focus){
-    var fp=1+Math.sin(now/420)*0.045;
-    ringQuad(focus.pos, focus.L.size*1.80*fp, [1.0,0.86,0.52], 0.80, 0.070);
-    ringQuad(focus.pos, focus.L.size*2.45*fp, [1.0,0.82,0.46], 0.16, 0.028);
-    glowQuad(focus.pos, focus.L.size*2.9, focus.col, 0.14, 2.2);
-  }
-  gl.depthMask(true);
+  /* One canvas, two scenes. The solar system is the project seen from outside;
+     the brain is the same project seen from inside. Exactly one is drawn, so a
+     phone never pays for the scene it is not looking at. */
+  if(view==='brain') drawBrain(now, dt);
+  else drawSolar(now, dt);
 
   if(usePost){
     gl.disable(gl.DEPTH_TEST); gl.disable(gl.BLEND);
@@ -1118,6 +1323,286 @@ function draw(now, dt){
     gl.activeTexture(gl.TEXTURE0);
     gl.enable(gl.DEPTH_TEST);
   }
+}
+
+/* ---------------- the brain ----------------
+   The board on the PC draws this head as a lit surface with nineteen thousand
+   points. A phone gets the honest cheap version of the same thing: the skin as
+   dust and one point per real task, from the identical arithmetic in geom.js —
+   so the two screens agree by construction rather than by being kept in step
+   by hand.
+
+   The SHAPE is arithmetic and is built here on the device, which is why this
+   page can carry it: arithmetic is not content. The WORDS — what each domain is
+   called, how many tasks are done — are content, and content only ever reaches
+   this page inside the encrypted state. Until that arrives the shape is drawn
+   and the panel says plainly that the rest has not come yet. It does not guess.
+   ---------------------------------------------------------------- */
+var BR_S = 3.4;                     /* the head is about 1.35 across; this frames it */
+var BR_SKIN = null;                 /* the dust, built once — it never depends on data */
+var BR = null;                      /* buffers + tallies for what is currently drawn */
+
+function brainData(){
+  var b = D && D.brain;
+  return (b && b.cells && b.cells.length && b.domains && b.domains.length) ? b : null;
+}
+
+function buildBrain(){
+  if(typeof NXGEOM==='undefined') return null;
+  var bd  = brainData();
+  var key = bd ? bd.cells.map(function(c){ return c.id+(c.d===true?'1':c.d==='pre'?'p':'0'); }).join(',') : '-';
+  if(BR && BR.key===key) return BR;
+  if(!BR_SKIN) BR_SKIN = NXGEOM.buildShell();
+
+  var DC={}; if(bd) bd.domains.forEach(function(d){ DC[d.k]=d; });
+  var colOf=function(k){ return hex2rgb((DC[k]||{c:'#8fa6cf'}).c); };
+
+  var cells=[];
+  if(bd){
+    /* the same order the board uses: done first, then prior work, then waiting —
+       so a cell keeps its place on both screens */
+    var rank=function(c){ return c.d===true?0:(c.d==='pre'?1:2); };
+    bd.cells.map(function(c,i){ return {c:c,i:i}; })
+      .sort(function(a,b){ return rank(a.c)-rank(b.c) || a.i-b.i; })
+      .forEach(function(o){ cells.push({ c:o.c, p:NXGEOM.place(o.c,o.i) }); });
+  }
+
+  var n = BR_SKIN.length + cells.length;
+  var P=new Float32Array(n*3), Sz=new Float32Array(n), Ph=new Float32Array(n), Cl=new Float32Array(n*3);
+  var w=0;
+  BR_SKIN.forEach(function(s){
+    P[w*3]=s.x*BR_S; P[w*3+1]=s.y*BR_S; P[w*3+2]=s.z*BR_S;
+    /* the skin only hints at the colour; the tasks carry it. Kept low on purpose:
+       the bloom pass burns to white if the dust is allowed to be bright. */
+    var c=colOf(s.dom), f=0.16+Math.pow(s.f,1.6)*0.26;
+    Cl[w*3]=(c[0]*0.45+0.32)*f; Cl[w*3+1]=(c[1]*0.45+0.34)*f; Cl[w*3+2]=(c[2]*0.45+0.40)*f;
+    Sz[w]=0.34; Ph[w]=s.f;
+    w++;
+  });
+  var tal={}, done=0, pre=0;
+  if(bd) bd.domains.forEach(function(d){ tal[d.k]={done:0,pre:0,tot:0}; });
+  cells.forEach(function(o,i){
+    var c=o.c, isDone=c.d===true, isPre=c.d==='pre';
+    P[w*3]=o.p[0]*BR_S; P[w*3+1]=o.p[1]*BR_S; P[w*3+2]=o.p[2]*BR_S;
+    var col=colOf(c.dom), k = isDone?1.00 : isPre?0.46 : 0.13;
+    Cl[w*3]=col[0]*k; Cl[w*3+1]=col[1]*k; Cl[w*3+2]=col[2]*k;
+    Sz[w] = isDone?1.55 : isPre?1.15 : 0.80;
+    Ph[w] = (i%17)/17;
+    w++;
+    var t=tal[c.dom]; if(t){ t.tot++; if(isDone){t.done++;} if(isPre){t.pre++;} }
+    if(isDone) done++; if(isPre) pre++;
+  });
+
+  if(BR && BR.buf){ ['p','s','ph','c'].forEach(function(k){ gl.deleteBuffer(BR.buf[k]); }); }
+  BR = { key:key, n:n, cells:cells.length, done:done, pre:pre, tal:tal,
+         buf:{ p:NX.buf(gl,P), s:NX.buf(gl,Sz), ph:NX.buf(gl,Ph), c:NX.buf(gl,Cl) } };
+  return BR;
+}
+
+/* Where the head has to sit so the panel does not cover it. Upright the panel is
+   a card along the bottom, so the head is pushed up and pulled back; on its side
+   the panel is a column down the left, so the head goes right instead. The
+   numbers were read off the panel's measured box, not guessed. */
+function brainFrame(){
+  var land = window.innerHeight <= 560 && window.innerWidth > window.innerHeight;
+  return land ? { dist: baseDist()*1.30, y: 0.02, x: -0.46 }
+              : { dist: baseDist()*1.21, y:-0.35, x: 0 };
+}
+
+function drawBrain(now, dt){
+  var b=buildBrain();
+  if(!b) return;
+  gl.enable(gl.BLEND); gl.blendFunc(gl.ONE,gl.ONE);
+  gl.disable(gl.DEPTH_TEST); gl.depthMask(false);
+  gl.useProgram(PROG.star);
+  gl.uniformMatrix4fv(PROG.star.u.uV,false,mV);
+  gl.uniformMatrix4fv(PROG.star.u.uP,false,mP);
+  gl.uniform1f(PROG.star.u.uPix, cv.height*0.5/Math.tan(FOV/2));
+  gl.uniform1f(PROG.star.u.uT, now/1000);
+  bindAttr(PROG.star.a.aP, b.buf.p, 3);
+  bindAttr(PROG.star.a.aS, b.buf.s, 1);
+  bindAttr(PROG.star.a.aPh,b.buf.ph,1);
+  bindAttr(PROG.star.a.aC, b.buf.c, 3);
+  gl.drawArrays(gl.POINTS,0,b.n);
+  gl.enable(gl.DEPTH_TEST); gl.depthMask(true);
+}
+
+function paintBrainPanel(){
+  var box=document.querySelector('#brain .box'); if(!box) return;
+  var bd=brainData();
+  if(!bd){
+    box.innerHTML='<div class="none"><b>המוח עוד לא משודר.</b><br>' +
+      'הצורה שרואים היא הצורה האמיתית — היא מחושבת כאן במכשיר. ' +
+      'השמות והמספרים יושבים על המחשב, והם מגיעים רק כשהמשדר רץ. ' +
+      'הרץ את כפתור 13 והם יופיעו כאן לבד.</div>';
+    return;
+  }
+  var b=buildBrain(); if(!b) return;
+  var tot=b.cells, lit=b.done+b.pre, pct=tot?Math.round(lit/tot*100):0;
+  var h='<div class="ttl"><b>המוח</b><span>כל נקודה היא משימה אמיתית</span>'+
+        '<span class="pc">'+pct+'%</span></div>'+
+        '<div class="sum">'+lit+' תאים קיימים מתוך '+tot+'. <b style="color:var(--ink)">'+b.done+
+        '</b> אומתו · '+b.pre+' נבנו קודם · '+(tot-lit)+' ממתינים.</div><div class="rows">';
+  bd.domains.forEach(function(d){
+    var t=b.tal[d.k]||{done:0,pre:0,tot:0};
+    var p=t.tot?t.done/t.tot*100:0, q=t.tot?t.pre/t.tot*100:0;
+    h+='<div class="r"><div class="top"><span class="dot" style="background:'+d.c+';color:'+d.c+'"></span>'+
+       '<span class="nm">'+d.he+'</span><span class="ct">'+(t.done+t.pre)+'/'+t.tot+'</span></div>'+
+       '<div class="bar"><i style="width:'+p.toFixed(0)+'%;background:'+d.c+'"></i>'+
+       '<i style="width:'+q.toFixed(0)+'%;background:'+d.c+';opacity:.34"></i></div></div>';
+  });
+  box.innerHTML=h+'</div>';
+}
+
+/* ---------------- the solar system ---------------- */
+function drawSolar(now, dt){
+    var pulse=1+Math.sin(now/900)*0.045;
+    if(QUAL) coronaQuad(8.4*SUN_R*pulse, [1.0,0.68,0.32], 0.26, now/1000);
+    glowQuad([0,0,0], 7.4*pulse, [1.0,0.58,0.22], QUAL?0.17:0.26, 2.6);
+    glowQuad([0,0,0], 3.6*pulse,  [1.0,0.82,0.44], 0.38, 3.4);
+    glowQuad([0,0,0], 1.6*pulse,  [1.0,0.94,0.72], 0.45, 5.0);
+
+    gl.enable(gl.DEPTH_TEST); gl.depthMask(false);
+    gl.blendFunc(gl.SRC_ALPHA,gl.ONE_MINUS_SRC_ALPHA);
+    gl.useProgram(PROG.solid);
+    gl.uniformMatrix4fv(PROG.solid.u.uMVP,false,mVP);
+    bodies.forEach(function(b){
+      gl.uniform3fv(PROG.solid.u.uC,b.col);
+      gl.uniform1f(PROG.solid.u.uO,0.13);
+      bindAttr(PROG.solid.a.aP,b.orbit,3);
+      gl.drawArrays(gl.LINE_LOOP,0,140);
+    });
+
+    if(stages().length){
+      if(BUF.stageRingR !== beltR()){ if(BUF.stageRing) gl.deleteBuffer(BUF.stageRing);
+        BUF.stageRingR = beltR(); BUF.stageRing = NX.buf(gl, NX.circle(BUF.stageRingR,150,STAGE_TILT)); }
+      gl.uniform3f(PROG.solid.u.uC, 0.85,0.72,0.42);
+      gl.uniform1f(PROG.solid.u.uO, 0.10);
+      bindAttr(PROG.solid.a.aP, BUF.stageRing, 3);
+      gl.drawArrays(gl.LINE_LOOP,0,150);
+    }
+
+    /* the links themselves stay almost invisible on purpose */
+    for(var li=0; li<links.length; li++){
+      var L=links[li]; if(!L.buf) continue;
+      gl.uniform3fv(PROG.solid.u.uC, L.col);
+      gl.uniform1f(PROG.solid.u.uO, 0.18);
+      bindAttr(PROG.solid.a.aP, L.buf, 3);
+      gl.drawArrays(gl.LINE_STRIP, 0, L.n+1);
+    }
+
+    /* a short wake behind each planet */
+    bodies.forEach(function(b){
+      if(b.trail.length<6) return;
+      var arr=new Float32Array(b.trail.length*3);
+      for(var i=0;i<b.trail.length;i++){ arr[i*3]=b.trail[i][0]; arr[i*3+1]=b.trail[i][1]; arr[i*3+2]=b.trail[i][2]; }
+      gl.bindBuffer(gl.ARRAY_BUFFER, BUF.dyn);
+      gl.bufferData(gl.ARRAY_BUFFER, arr, gl.DYNAMIC_DRAW);
+      gl.enableVertexAttribArray(PROG.solid.a.aP);
+      gl.vertexAttribPointer(PROG.solid.a.aP,3,gl.FLOAT,false,0,0);
+      gl.uniform3fv(PROG.solid.u.uC,b.col);
+      gl.uniform1f(PROG.solid.u.uO,0.22);
+      gl.drawArrays(gl.LINE_STRIP,0,b.trail.length);
+    });
+    gl.depthMask(true);
+
+    gl.disable(gl.BLEND);
+    gl.useProgram(PROG.sun);
+    NX.model(0,0,0, now/9000, SUN_R, 0, mM);
+    NX.mul(mVP,mM,mMVP);
+    gl.uniformMatrix4fv(PROG.sun.u.uMVP,false,mMVP);
+    gl.uniform1f(PROG.sun.u.uT, now/1000);
+    gl.uniform3f(PROG.sun.u.uEyeL, eye[0]/SUN_R, eye[1]/SUN_R, eye[2]/SUN_R);
+    bindAttr(PROG.sun.a.aP,BUF.sphP,3);
+    gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER,BUF.sphI);
+    gl.drawElements(gl.TRIANGLES,GEO.sphCount,gl.UNSIGNED_SHORT,0);
+
+    gl.enable(gl.BLEND); gl.blendFunc(gl.SRC_ALPHA,gl.ONE_MINUS_SRC_ALPHA);
+    gl.useProgram(PROG.solid);
+    NX.model(0,0,0, 0, 1, 0, mM); NX.mul(mVP,mM,mMVP);
+    gl.uniformMatrix4fv(PROG.solid.u.uMVP,false,mMVP);
+    if(ringBase){
+      gl.uniform3f(PROG.solid.u.uC,0.16,0.22,0.36); gl.uniform1f(PROG.solid.u.uO,0.9);
+      bindAttr(PROG.solid.a.aP,ringBase.p,3);
+      gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER,ringBase.i);
+      gl.drawElements(gl.TRIANGLES,ringBase.n,gl.UNSIGNED_SHORT,0);
+    }
+    if(ringArc){
+      gl.blendFunc(gl.ONE,gl.ONE);
+      NX.model(0,0,0, now/26000, 1, 0, mM); NX.mul(mVP,mM,mMVP);
+      gl.uniformMatrix4fv(PROG.solid.u.uMVP,false,mMVP);
+      if(ringVerified) gl.uniform3f(PROG.solid.u.uC,1.0,0.83,0.47);
+      else             gl.uniform3f(PROG.solid.u.uC,1.0,0.62,0.26);
+      gl.uniform1f(PROG.solid.u.uO, ringVerified?0.70:0.45);
+      bindAttr(PROG.solid.a.aP,ringArc.p,3);
+      gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER,ringArc.i);
+      gl.drawElements(gl.TRIANGLES,ringArc.n,gl.UNSIGNED_SHORT,0);
+    }
+
+    gl.disable(gl.BLEND);
+    gl.useProgram(PROG.planet);
+    gl.uniform3fv(PROG.planet.u.uEye,eye);
+    bindAttr(PROG.planet.a.aP,BUF.sphP,3);
+    bindAttr(PROG.planet.a.aN,BUF.sphN,3);
+    gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER,BUF.sphI);
+    bodies.forEach(function(b){
+      b.ang += dt*b.L.speed; b.spin += dt*0.16;
+      var R=b.L.r, ct=Math.cos(b.L.tilt), st=Math.sin(b.L.tilt);
+      var x=Math.cos(b.ang)*R, z0=Math.sin(b.ang)*R;
+      b.pos[0]=x; b.pos[1]=-z0*st; b.pos[2]=z0*ct;
+      b.trailT=(b.trailT||0)+dt;
+      if(b.trailT>0.08){ b.trailT=0;
+        b.trail.push([b.pos[0],b.pos[1],b.pos[2]]);
+        if(b.trail.length>26) b.trail.shift(); }
+      NX.model(b.pos[0],b.pos[1],b.pos[2], 0, b.L.size, 0, mM);
+      NX.mul(mVP,mM,mMVP);
+      gl.uniformMatrix4fv(PROG.planet.u.uMVP,false,mMVP);
+      gl.uniformMatrix4fv(PROG.planet.u.uM,false,mM);
+      gl.uniform3fv(PROG.planet.u.uC,b.col);
+      gl.uniform1f(PROG.planet.u.uE,0.055);
+      gl.uniform1f(PROG.planet.u.uSeed,b.L.seed);
+      gl.uniform1f(PROG.planet.u.uBand,b.L.band);
+      gl.uniform1f(PROG.planet.u.uSpin,b.spin);
+      gl.drawElements(gl.TRIANGLES,GEO.sphCount,gl.UNSIGNED_SHORT,0);
+    });
+
+    gl.enable(gl.BLEND); gl.blendFunc(gl.ONE,gl.ONE); gl.depthMask(false);
+    drawStages(now);
+    bodies.forEach(function(b){
+      glowQuad(b.pos, b.L.size*2.6, b.col, 0.13, 2.9);
+      var f=0.30+0.26*Math.abs(Math.sin(now/700+b.L.r));
+      glowQuad(b.pos, b.L.size*1.35, b.pip, f, 3.6);
+    });
+    for(var i=couriers.length-1;i>=0;i--){
+      var c=couriers[i]; c.t+=dt*c.v;
+      if(c.t>=1){ couriers.splice(i,1); continue; }
+      var p, cc;
+      if(c.link){ p=NX.arcAt(c.link.a.pos, c.link.b.pos, c.link.bow, c.t); cc=c.link.a.col; }
+      else { p=[c.b.pos[0]*c.t, c.b.pos[1]*c.t+Math.sin(c.t*Math.PI)*0.45, c.b.pos[2]*c.t]; cc=c.b.col; }
+      var f=Math.sin(c.t*Math.PI);
+      glowQuad(p, 0.46, cc, f*0.95, 2.2);
+      glowQuad(p, 0.17, [1,1,1], f*0.95, 3.4);
+    }
+    ships.forEach(function(sh){
+      var back=[sh.pos[0]-sh.dir[0]*0.17, sh.pos[1]-sh.dir[1]*0.17, sh.pos[2]-sh.dir[2]*0.17];
+      glowQuad(back, 0.24, sh.glow, 0.60, 2.8);
+      glowQuad(back, 0.11, [0.85,0.95,1.0], 0.90, 3.8);
+      glowQuad([sh.pos[0]-sh.dir[0]*0.45, sh.pos[1]-sh.dir[1]*0.45, sh.pos[2]-sh.dir[2]*0.45],
+               0.34, sh.glow, 0.13, 2.0);
+    });
+    aliens.forEach(function(al){
+      var f=Math.sin(Math.min(1,al.t)*Math.PI);
+      glowQuad([al.pos[0],al.pos[1]-0.07,al.pos[2]], 0.78, [0.30,0.95,0.70], 0.48*f, 2.4);
+      glowQuad([al.pos[0],al.pos[1]+0.08,al.pos[2]], 0.30, [0.60,1.0,0.85], 0.95*f, 3.2);
+    });
+    /* whatever is in focus wears a ring, so the tap has an answer on screen */
+    if(focus){
+      var fp=1+Math.sin(now/420)*0.045;
+      ringQuad(focus.pos, focus.L.size*1.80*fp, [1.0,0.86,0.52], 0.80, 0.070);
+      ringQuad(focus.pos, focus.L.size*2.45*fp, [1.0,0.82,0.46], 0.16, 0.028);
+      glowQuad(focus.pos, focus.L.size*2.9, focus.col, 0.14, 2.2);
+    }
+    gl.depthMask(true);
 }
 function bindAttr(loc,b,n){
   if(loc===undefined||loc<0) return;
@@ -1264,7 +1749,9 @@ cv.addEventListener('pointermove',function(e){
 });
 cv.addEventListener('pointerup',function(e){
   var tapped = drag && drag.moved<9; drag=null;
-  if(tapped) hit(e.clientX,e.clientY);
+  /* there are no planets in the brain view — a tap there would focus something
+     that is not on screen and fly the camera away from what you are looking at */
+  if(tapped && view!=='brain') hit(e.clientX,e.clientY);
 });
 cv.addEventListener('pointercancel',function(){ drag=null; });
 cv.addEventListener('wheel',function(e){
@@ -1399,15 +1886,22 @@ function setView(v){
     t.classList.toggle('on',t.dataset.v===v); });
   document.getElementById('head').classList.toggle('hide',v!=='now');
   document.getElementById('big').classList.toggle('on',v==='count');
-  document.getElementById('scrim').classList.toggle('on',v==='count');
+  document.getElementById('scrim').classList.toggle('on',v==='count' || v==='brain');
+  document.getElementById('brain').classList.toggle('on',v==='brain');
   if(v==='count'){ focus=null; shiftTo=shiftBase; camState.tDist=10.5; camState.tEl=0.42; sheet.classList.remove('open'); }
   else if(v==='log'){ focus=null; shiftTo=shiftBase; camState.tDist=baseDist()+3.0; camState.tEl=1.05; openLog(); }
+  /* the head is built the first time it is asked for, not on boot: nobody should
+     pay a quarter of a second for a view they never opened */
+  else if(v==='brain'){ var f=brainFrame();
+                        focus=null; shiftTo=f.y; camState.tDist=f.dist; camState.tEl=0.30;
+                        sheet.classList.remove('open'); paintBrainPanel(); }
   else { focus=null; shiftTo=shiftBase; camState.tDist=baseDist(); camState.tEl=0.78; sheet.classList.remove('open'); }
   measureHead();
 }
 
 /* ---------------- paint ---------------- */
 function paint(){
+  if(view==='brain') paintBrainPanel();   /* new state may have brought the words */
   var n=D.need||{level:'none',title:'—',sub:''};
   var lv=({none:'#39e6a4',soon:'#ffc857',now:'#ff5d6c'})[n.level]||'#7f8fb5';
   var hd=document.getElementById('hdot');
