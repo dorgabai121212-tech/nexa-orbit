@@ -795,7 +795,7 @@ var QUAL=1, qSamples=[], qSettled=false;
 /* Everything is rendered into a texture first, then a bright pass, two blurs
    and a composite. That is what makes light spill the way a camera does —
    additive sprites alone always read as flat decals. */
-var FB={}, HDR=false, POST=true;
+var FB={}, HDR=false, POST=true, STREAK=false;
 
 /* shared GLSL: value noise + fBm, used by both the sun and the surfaces */
 var NOISE =
@@ -809,11 +809,15 @@ function initGL(){
   PROG.bg = NX.program(gl,
     "attribute vec2 aQ; varying vec2 vUV; void main(){ vUV=aQ*0.5+0.5; gl_Position=vec4(aQ,0.999,1.0); }",
     "precision mediump float; varying vec2 vUV;"+
+    /* Space is black. The purple wash that used to sit here lifted the floor of
+       every frame, and a picture with no true black in it cannot look deep no
+       matter what is drawn on top of it. What is left is a cold breath near the
+       star and nothing else. */
     "void main(){ vec2 p=vUV; float r=length((p-vec2(0.5,0.46))*vec2(1.0,1.22));"+
-    " vec3 top=vec3(0.021,0.033,0.074), bot=vec3(0.005,0.009,0.024);"+
+    " vec3 top=vec3(0.009,0.015,0.035), bot=vec3(0.002,0.004,0.011);"+
     " vec3 c=mix(bot,top,smoothstep(0.0,1.0,1.0-p.y));"+
-    " c+=vec3(0.055,0.032,0.105)*exp(-r*2.5);"+
-    " c*=1.0-0.40*smoothstep(0.42,1.10,r);"+
+    " c+=vec3(0.028,0.020,0.056)*exp(-r*3.4);"+
+    " c*=1.0-0.55*smoothstep(0.36,1.10,r);"+
     " gl_FragColor=vec4(c,1.0); }");
 
   PROG.star = NX.program(gl,
@@ -841,17 +845,27 @@ function initGL(){
     "void main(){ vP=aP; vN=normalize(aP); gl_Position=uMVP*vec4(aP,1.0); }",
     "precision highp float; uniform float uT; uniform vec3 uEyeL;"+
     "varying vec3 vP; varying vec3 vN;"+NOISE+
-    "void main(){ vec3 q=vP*2.6; float t=uT*0.16;"+
-    " float g=fbm(q+vec3(0.0,t,0.0))*0.62+fbm(q*2.7-vec3(t,0.0,t))*0.26+fbm(q*6.1+vec3(t*1.9))*0.12;"+
-    /* granulation cells on top of the slow convection */
-    " float cell=fbm(q*9.0+vec3(t*2.6,0.0,-t*2.1));"+
-    " g=mix(g,cell,0.22);"+
-    " vec3 hot=vec3(2.10,1.92,1.55), mid=vec3(1.70,1.18,0.46), low=vec3(1.30,0.42,0.11);"+
-    " vec3 c=mix(low,mid,smoothstep(0.26,0.58,g)); c=mix(c,hot,smoothstep(0.58,0.90,g));"+
-    /* limb darkening: a real star is dimmer and redder at the edge */
+    /* A star is not a piece of fruit. What made it read as one was a big slow
+       blotch pattern with a bright edge: low-frequency patches look like peel,
+       and a limb that stays bright makes the whole thing a flat disc. So the
+       structure is pushed up in frequency until it is granulation rather than
+       patches, the disc is driven hard toward white in the middle, and the limb
+       is taken down steeply so the edge falls away into the corona instead of
+       ending on a line. */
+    "void main(){ vec3 q=vP*3.4; float t=uT*0.16;"+
+    " float g=fbm(q+vec3(0.0,t,0.0))*0.40+fbm(q*3.1-vec3(t,0.0,t))*0.30+fbm(q*7.3+vec3(t*1.9))*0.30;"+
+    " float cell=fbm(q*12.0+vec3(t*2.6,0.0,-t*2.1));"+
+    " g=mix(g,cell,0.26);"+
+    " g=clamp((g-0.36)*1.55+0.58,0.0,1.4);"+          /* contrast: cells, not patches */
+    " vec3 core=vec3(3.30,3.05,2.60), hot=vec3(2.60,1.95,1.05), mid=vec3(1.90,1.05,0.34), low=vec3(1.25,0.46,0.12);"+
+    " vec3 c=mix(low,mid,smoothstep(0.14,0.46,g));"+
+    " c=mix(c,hot,smoothstep(0.44,0.74,g));"+
+    " c=mix(c,core,smoothstep(0.74,1.05,g));"+
+    /* real limb darkening lands near a third at the edge, not near zero — take it
+       further and the star stops being a light source and becomes a stone */
     " float mu=max(dot(normalize(vN),normalize(uEyeL-vP)),0.0);"+
-    " float limb=0.36+0.64*pow(mu,0.55);"+
-    " c*=limb; c=mix(c,c*vec3(1.05,0.62,0.30),1.0-limb); c*=1.15;"+
+    " float limb=0.30+0.70*pow(mu,0.60);"+
+    " c*=limb; c=mix(c,c*vec3(1.10,0.62,0.30),pow(1.0-limb,1.5)*0.85); c*=1.26;"+
     " gl_FragColor=vec4(c,1.0); }");
 
   var DERIV = gl.getExtension('OES_standard_derivatives') ? "#extension GL_OES_standard_derivatives : enable\n" : "";
@@ -872,9 +886,10 @@ function initGL(){
     " float bands=0.5+0.5*sin(sp.y*11.0+warp*3.4+uSeed);"+
     " float blotch=fbm(sp*3.4+uSeed*2.0);"+
     " float s=mix(blotch,bands,uBand);"+
-    " vec3 dark=uC*0.42, lightc=mix(uC,vec3(1.0),0.30);"+
-    " vec3 alb=mix(dark,lightc,smoothstep(0.32,0.72,s));"+
-    " alb=mix(alb,uC*1.25,smoothstep(0.80,0.97,blotch)*0.5);"+
+    /* a saturated body reads as a place; a pastel one reads as a sweet */
+    " vec3 dark=uC*0.20, lightc=mix(uC,vec3(1.0),0.16);"+
+    " vec3 alb=mix(dark,lightc,smoothstep(0.30,0.74,s));"+
+    " alb=mix(alb,uC*1.30,smoothstep(0.78,0.97,blotch)*0.55);"+
     /* lighting from the sun at the origin */
     " vec3 N=normalize(vN); vec3 L=normalize(-vW); vec3 V=normalize(uEye-vW);"+
     /* relief: bend the normal along the gradient of the surface pattern.
@@ -888,18 +903,25 @@ function initGL(){
     "\n#endif\n"+
     " float ndl=dot(N,L);"+
     " float dif=max(ndl,0.0);"+
-    " float wrap=max((ndl+0.30)/1.30,0.0);"+
-    " float rim=pow(1.0-max(dot(N,V),0.0),2.8);"+
-    /* two lobes: a broad sheen and a tight highlight, so it reads as a body
-       and not as a billiard ball */
+    /* The night side has to actually be night. Filling it with a wide wrap term
+       is what turns a world into a painted marble: the terminator disappears and
+       all that is left is a flat disc with a hot spot. Keep the wrap to the thin
+       band of subsurface bleed a real limb has, and let the rest go dark. */
+    " float wrap=max((ndl+0.14)/1.14,0.0); wrap*=wrap;"+
+    " float fres=pow(1.0-max(dot(N,V),0.0),3.0);"+
     " vec3 H=normalize(L+V);"+
-    " float sheen=pow(max(dot(N,H),0.0),9.0)*0.09;"+
-    " float spec =pow(max(dot(N,H),0.0),48.0)*0.20;"+
+    " float sheen=pow(max(dot(N,H),0.0),9.0)*0.07;"+
+    " float spec =pow(max(dot(N,H),0.0),48.0)*0.18;"+
     /* warm bounce right at the terminator, where a real surface reddens */
-    " float term=exp(-abs(ndl)*7.0)*0.30;"+
-    " vec3 c=alb*(0.085+0.50*wrap+0.60*dif)+vec3(1.0,0.96,0.90)*(spec+sheen);"+
+    " float term=exp(-abs(ndl)*8.0)*0.26;"+
+    " vec3 c=alb*(0.030+0.16*wrap+1.05*dif)+vec3(1.0,0.96,0.90)*(spec+sheen)*dif;"+
     " c+=mix(uC,vec3(1.0,0.55,0.30),0.6)*term;"+
-    " c+=uC*rim*0.70;"+
+    /* Air. A planet's limb glows only where the sun is actually hitting it, which
+       is why a real crescent has a bright hairline and a dead edge opposite. A
+       rim that glows all the way round is a decal, and reads as one. */
+    " float lit=smoothstep(-0.35,0.55,ndl);"+
+    " vec3 sky=mix(uC,vec3(0.62,0.80,1.0),0.35);"+
+    " c+=sky*fres*(0.14+1.15*lit);"+
     " c+=alb*uE;"+
     " gl_FragColor=vec4(c,1.0); }");
 
@@ -993,7 +1015,7 @@ function buildPost(){
     " gl_FragColor=vec4(c,1.0); }");
   PROG.post = NX.program(gl, VS,
     "precision mediump float; varying vec2 vT;"+
-    "uniform sampler2D uScene,uBloom; uniform float uAmt,uT; uniform vec2 uRes;"+
+    "uniform sampler2D uScene,uBloom,uStreak; uniform float uAmt,uT,uStr; uniform vec2 uRes;"+
     /* a lens does not sample the three channels at the same place */
     "vec3 chroma(sampler2D s, vec2 uv){"+
     " vec2 d=(uv-0.5); float k=dot(d,d)*0.0035;"+
@@ -1003,15 +1025,20 @@ function buildPost(){
     "void main(){"+
     " vec3 c=chroma(uScene,vT);"+
     " c+=texture2D(uBloom,vT).rgb*uAmt;"+
+    /* The anamorphic streak. A wide lens smears a bright point sideways into a
+       cold horizontal flare, and that one artefact is most of why a frame reads
+       as a film and not as a chart. It is tinted cool and kept well under the
+       round bloom, because a streak you notice as a streak is a filter. */
+    " c+=texture2D(uStreak,vT).rgb*vec3(0.55,0.74,1.0)*uStr;"+
     " c=aces(c*1.06);"+
     " float r=length((vT-0.5)*vec2(1.0,1.12));"+
-    " c*=1.0-0.44*smoothstep(0.42,1.02,r);"+          /* vignette */
+    " c*=1.0-0.50*smoothstep(0.38,1.02,r);"+          /* vignette */
     " float g=fract(sin(dot(vT*uRes+uT,vec2(12.9898,78.233)))*43758.5453);"+
     " c+=(g-0.5)*0.020;"+                              /* film grain */
     " gl_FragColor=vec4(c,1.0); }");
 }
 function resizePost(){
-  ['scene','a','b'].forEach(function(k){
+  ['scene','a','b','c'].forEach(function(k){
     if(FB[k]){ gl.deleteTexture(FB[k].tex); gl.deleteFramebuffer(FB[k].fb); FB[k]=null; }
   });
   var hf = gl.getExtension('OES_texture_half_float');
@@ -1023,7 +1050,11 @@ function resizePost(){
   if(!FB.scene && HDR){ HDR=false; FB.scene=makeTarget(w,h,gl.UNSIGNED_BYTE); type=gl.UNSIGNED_BYTE; }
   FB.a = makeTarget(hw,hh,type);
   FB.b = makeTarget(hw,hh,type);
+  /* the streak lives at a quarter width: it is a horizontal smear, so vertical
+     detail in it is wasted memory and wasted fill */
+  FB.c = makeTarget(Math.max(2,w>>2), Math.max(2,h>>2), type);
   POST = !!(FB.scene && FB.a && FB.b);
+  STREAK = POST && !!FB.c;
 }
 function fsQuad(prog){
   gl.useProgram(prog);
@@ -1308,6 +1339,33 @@ function draw(now, dt){
       gl.uniform2f(PROG.blur.u.uDir, 0, rad/FB.a.h);
       fsQuad(PROG.blur);
     }
+    /* the streak: two horizontal-only passes off the finished bloom. Horizontal
+       only — that is the whole point, and it is why it can live at quarter size. */
+    /* Not gated on QUAL. Three quarter-size horizontal passes are cheap, and the
+       project's own rule is that adaptive quality may drop the corona and the
+       nebulae but never the grade — the streak is the grade. */
+    var doStreak = STREAK;
+    if(doStreak){
+      gl.bindFramebuffer(gl.FRAMEBUFFER, FB.c.fb);
+      gl.viewport(0,0,FB.c.w,FB.c.h);
+      gl.useProgram(PROG.blur);
+      gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, FB.a.tex);
+      gl.uniform1i(PROG.blur.u.uS,0);
+      gl.uniform2f(PROG.blur.u.uDir, 5.0/FB.c.w, 0);
+      fsQuad(PROG.blur);
+      gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, FB.b.tex);
+      gl.bindFramebuffer(gl.FRAMEBUFFER, FB.b.fb);
+      gl.viewport(0,0,FB.b.w,FB.b.h);
+      gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, FB.c.tex);
+      gl.uniform2f(PROG.blur.u.uDir, 16.0/FB.b.w, 0);
+      fsQuad(PROG.blur);
+      gl.bindFramebuffer(gl.FRAMEBUFFER, FB.c.fb);
+      gl.viewport(0,0,FB.c.w,FB.c.h);
+      gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, FB.b.tex);
+      gl.uniform2f(PROG.blur.u.uDir, 40.0/FB.c.w, 0);
+      fsQuad(PROG.blur);
+    }
+
     /* composite to the screen */
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
     gl.viewport(0,0,cv.width,cv.height);
@@ -1316,6 +1374,9 @@ function draw(now, dt){
     gl.uniform1i(PROG.post.u.uScene,0);
     gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, FB.a.tex);
     gl.uniform1i(PROG.post.u.uBloom,1);
+    gl.activeTexture(gl.TEXTURE2); gl.bindTexture(gl.TEXTURE_2D, (doStreak?FB.c:FB.a).tex);
+    gl.uniform1i(PROG.post.u.uStreak,2);
+    gl.uniform1f(PROG.post.u.uStr, doStreak ? (HDR?0.50:0.38) : 0.0);
     gl.uniform1f(PROG.post.u.uAmt, HDR?0.42:0.34);
     gl.uniform1f(PROG.post.u.uT, (now%10000)/1000);
     gl.uniform2f(PROG.post.u.uRes, cv.width, cv.height);
@@ -1424,6 +1485,32 @@ function drawBrain(now, dt){
   bindAttr(PROG.star.a.aPh,b.buf.ph,1);
   bindAttr(PROG.star.a.aC, b.buf.c, 3);
   gl.drawArrays(gl.POINTS,0,b.n);
+
+  /* The couriers and the ships belong here too. They already fly between the
+     planets in the other view; inside the head they run the same arcs, scaled
+     to it — because the traffic is the project working, and the project works
+     in here as much as it works out there. Aliens stay outside: their speech
+     bubbles are placed against the planets and would land on nothing. */
+  gl.blendFunc(gl.ONE,gl.ONE);
+  var S=BR_S/4.6;                       /* solar-system distances into head-sized ones */
+  for(var i=0;i<couriers.length;i++){
+    var c=couriers[i], p, cc;
+    if(c.link){ p=NX.arcAt(c.link.a.pos, c.link.b.pos, c.link.bow, c.t); cc=c.link.a.col; }
+    else { p=[c.b.pos[0]*c.t, c.b.pos[1]*c.t+Math.sin(c.t*Math.PI)*0.45, c.b.pos[2]*c.t]; cc=c.b.col; }
+    var f=Math.sin(c.t*Math.PI);
+    p=[p[0]*S,p[1]*S,p[2]*S];
+    glowQuad(p, 0.30, cc, f*0.85, 2.2);
+    glowQuad(p, 0.11, [1,1,1], f*0.85, 3.4);
+  }
+  for(var s=0;s<ships.length;s++){
+    var sh=ships[s];
+    var pp=[sh.pos[0]*S, sh.pos[1]*S, sh.pos[2]*S];
+    var bk=[pp[0]-sh.dir[0]*S*0.17, pp[1]-sh.dir[1]*S*0.17, pp[2]-sh.dir[2]*S*0.17];
+    glowQuad(bk, 0.18, sh.glow, 0.55, 2.8);
+    glowQuad(bk, 0.08, [0.85,0.95,1.0], 0.90, 3.8);
+    glowQuad([pp[0]-sh.dir[0]*S*0.45, pp[1]-sh.dir[1]*S*0.45, pp[2]-sh.dir[2]*S*0.45],
+             0.26, sh.glow, 0.12, 2.0);
+  }
   gl.enable(gl.DEPTH_TEST); gl.depthMask(true);
 }
 
@@ -1517,6 +1604,16 @@ function drawSolar(now, dt){
     gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER,BUF.sphI);
     gl.drawElements(gl.TRIANGLES,GEO.sphCount,gl.UNSIGNED_SHORT,0);
 
+    /* A star has no outline. Every glow before this point is behind the sphere,
+       so the sphere still ended on a hard circle and read as a painted ball.
+       These sit on top of the limb and eat the edge, which is the difference
+       between a light source and a marble. */
+    gl.enable(gl.BLEND); gl.blendFunc(gl.ONE,gl.ONE); gl.depthMask(false);
+    glowQuad([0,0,0], SUN_R*2.30*pulse, [1.00,0.72,0.34], 0.34, 2.0);
+    glowQuad([0,0,0], SUN_R*1.42*pulse, [1.00,0.88,0.58], 0.44, 2.6);
+    glowQuad([0,0,0], SUN_R*1.10*pulse, [1.00,0.96,0.84], 0.40, 3.6);
+    gl.depthMask(true);
+
     gl.enable(gl.BLEND); gl.blendFunc(gl.SRC_ALPHA,gl.ONE_MINUS_SRC_ALPHA);
     gl.useProgram(PROG.solid);
     NX.model(0,0,0, 0, 1, 0, mM); NX.mul(mVP,mM,mMVP);
@@ -1568,10 +1665,14 @@ function drawSolar(now, dt){
 
     gl.enable(gl.BLEND); gl.blendFunc(gl.ONE,gl.ONE); gl.depthMask(false);
     drawStages(now);
+    /* The status pip used to be a bright disc laid over the body, which at this
+       size just detached and floated beside it as a white blob. It is a wide,
+       faint halo now: the colour still says ok / watch / bad, but it belongs to
+       the planet instead of sitting in front of it. */
     bodies.forEach(function(b){
-      glowQuad(b.pos, b.L.size*2.6, b.col, 0.13, 2.9);
-      var f=0.30+0.26*Math.abs(Math.sin(now/700+b.L.r));
-      glowQuad(b.pos, b.L.size*1.35, b.pip, f, 3.6);
+      glowQuad(b.pos, b.L.size*3.1, b.col, 0.10, 2.6);
+      var f=0.13+0.10*Math.abs(Math.sin(now/700+b.L.r));
+      glowQuad(b.pos, b.L.size*2.0, b.pip, f, 2.2);
     });
     for(var i=couriers.length-1;i>=0;i--){
       var c=couriers[i]; c.t+=dt*c.v;
