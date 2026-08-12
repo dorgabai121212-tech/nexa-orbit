@@ -8,6 +8,8 @@
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="NEXA">
 <meta name="robots" content="noindex,nofollow,noarchive">
+<meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+<meta http-equiv="Pragma" content="no-cache">
 <title>NEXA</title>
 <style>
 :root{
@@ -112,7 +114,7 @@ canvas#sky{position:fixed;inset:0;width:100%;height:100%;display:block;z-index:0
 
 #stale{position:fixed;top:calc(var(--st) + 10px);inset-inline:12px;z-index:5;padding:10px 14px;border-radius:14px;
   font-size:12.5px;font-weight:700;background:rgba(255,93,108,.16);border:1px solid rgba(255,93,108,.42);
-  color:#ffb3ba;display:none;text-align:center;pointer-events:none}
+  color:#ffb3ba;display:none;text-align:center;pointer-events:auto;cursor:pointer}
 #stale.on{display:block}
 
 #lock{position:fixed;inset:0;z-index:8;background:#04060f;display:none;flex-direction:column;
@@ -913,14 +915,42 @@ function hhmm(iso){ try{ var d=new Date(iso);
   if(isNaN(d.getTime())) return '—';
   return ('0'+d.getHours()).slice(-2)+':'+('0'+d.getMinutes()).slice(-2); }catch(e){ return '—'; } }
 
-function checkStale(){
+/* One banner, three possible truths: something broke, the data is old, or
+   nothing at all arrived. Silence is never one of them. */
+function status(){
   var el=document.getElementById('stale');
   if(!GIST_ID){ el.classList.remove('on'); return; }
-  var age=(Date.now()-new Date(D.asOf).getTime())/60000;
-  if(!isFinite(age)) { el.classList.remove('on'); return; }
-  if(age>14){ el.textContent='הנתון האחרון מלפני '+Math.round(age)+' דקות — המחשב בבית כנראה כבוי או ישן';
-    el.classList.add('on'); }
+  var msg='';
+  if(DIAG.err) msg='לא הצלחתי להביא נתונים — '+DIAG.err;
+  else if(!(D.systems||[]).length) msg='התחברתי, אבל אין נתונים במטען. לחץ כאן.';
+  else {
+    var age=(Date.now()-new Date(D.asOf).getTime())/60000;
+    if(isFinite(age) && age>14) msg='הנתון מלפני '+Math.round(age)+' דקות — המחשב בבית כנראה כבוי או ישן';
+  }
+  if(msg){ el.textContent=msg+'  ⓘ'; el.classList.add('on'); }
   else el.classList.remove('on');
+}
+var checkStale = status;
+function openDiag(){
+  sheadT.textContent='בדיקת חיבור';
+  sheadD.style.background = DIAG.err ? '#ff5d6c' : '#39e6a4';
+  sheadD.style.boxShadow  = '0 0 10px '+(DIAG.err ? '#ff5d6c' : '#39e6a4');
+  var rows=[['כתובת הנתונים', DIAG.gist ? DIAG.gist.slice(0,10)+'…' : 'לא מוגדרת'],
+            ['קוד נשמר במכשיר', PIN ? 'כן' : 'לא'],
+            ['ניסיונות', String(DIAG.tries)],
+            ['ניסיון אחרון', DIAG.lastTry||'—'],
+            ['תשובת גיטהאב', DIAG.http||'—'],
+            ['גודל המטען', DIAG.bytes ? DIAG.bytes+' תווים' : '0'],
+            ['מערכות שהתקבלו', String(DIAG.systems)],
+            ['שלב', DIAG.step],
+            ['שגיאה', DIAG.err||'אין']];
+  var html='';
+  rows.forEach(function(r){ html+='<div class="kv"><span>'+esc(r[0])+'</span><b>'+esc(r[1])+'</b></div>'; });
+  html+='<div class="note">אם "תשובת גיטהאב" ריקה — אין אינטרנט. אם היא 403 — יותר מדי בקשות, זה יעבור לבד. אם "מערכות שהתקבלו" 0 אבל אין שגיאה — המחשב משדר מטען ריק, כלומר חסר קובץ המצב.</div>';
+  html+='<div class="note" id="dre" style="cursor:pointer;text-align:center;font-weight:800;color:#ffd479">נסה עכשיו שוב</div>';
+  sbody.innerHTML=html; sbody.scrollTop=0; openSheet();
+  var b=document.getElementById('dre');
+  if(b) b.onclick=function(){ b.textContent='מנסה...'; pull().then(function(){ openDiag(); }); };
 }
 
 /* ---------------- live feed ---------------- */
@@ -928,6 +958,8 @@ function checkStale(){
    through api.github.com, which is designed for browsers and therefore
    always sends the CORS header a raw file might not. */
 var PIN=null;
+var CACHE_KEY="nexa.last.v1";
+var DIAG={ gist:"", tries:0, lastTry:"", http:"", step:"boot", bytes:0, systems:0, err:"" };
 function b64(s){ var raw=atob(s.replace(/\s+/g,'')), a=new Uint8Array(raw.length);
   for(var i=0;i<raw.length;i++) a[i]=raw.charCodeAt(i); return a; }
 function eq(a,b){ if(a.length!==b.length) return false;
@@ -949,25 +981,50 @@ async function decrypt(payload, pin){
   return JSON.parse(new TextDecoder().decode(pt));
 }
 async function fetchPayload(){
-  var r=await fetch('https://api.github.com/gists/'+GIST_ID+'?t='+Date.now(),
-    {cache:'no-store', headers:{'Accept':'application/vnd.github+json'}});
-  if(!r.ok) throw new Error('http '+r.status);
+  DIAG.gist=GIST_ID; DIAG.tries++; DIAG.lastTry=new Date().toLocaleTimeString('he-IL');
+  DIAG.step='מוריד מגיטהאב';
+  var r;
+  try{
+    r=await fetch('https://api.github.com/gists/'+GIST_ID+'?t='+Date.now(),
+      {cache:'no-store', headers:{'Accept':'application/vnd.github+json'}});
+  }catch(e){ DIAG.http='נכשל'; throw new Error('אין חיבור לגיטהאב'); }
+  DIAG.http=r.status+' '+r.statusText;
+  if(r.status===403) throw new Error('גיטהאב חסם זמנית (יותר מדי בקשות). ינסה שוב עוד שתי דקות.');
+  if(r.status===404) throw new Error('הכתובת לא נמצאה. צריך להריץ שוב את קובץ 12.');
+  if(!r.ok) throw new Error('גיטהאב החזיר '+r.status);
+  DIAG.step='קורא את הקובץ';
   var j=await r.json();
   var f=j.files && (j.files['state.txt'] || j.files[Object.keys(j.files)[0]]);
-  if(!f) throw new Error('no file');
-  if(f.truncated && f.raw_url){ var r2=await fetch(f.raw_url,{cache:'no-store'}); return (await r2.text()).trim(); }
-  return String(f.content||'').trim();
+  if(!f) throw new Error('אין קובץ מצב בכתובת. הרץ את קובץ 13.');
+  var txt;
+  if(f.truncated && f.raw_url){ var r2=await fetch(f.raw_url,{cache:'no-store'}); txt=(await r2.text()).trim(); }
+  else txt=String(f.content||'').trim();
+  DIAG.bytes=txt.length;
+  if(!txt) throw new Error('הקובץ בכתובת ריק.');
+  if(txt==='init') throw new Error('עוד לא שודר כלום. הרץ את קובץ 13.');
+  return txt;
 }
 async function load(pin){
   var txt=await fetchPayload();
-  var j = txt.charAt(0)==='{' ? JSON.parse(txt) : await decrypt(txt,pin);
-  if(!j||!j.counter) throw new Error('shape');
+  DIAG.step='מפענח';
+  var j;
+  try{ j = txt.charAt(0)==='{' ? JSON.parse(txt) : await decrypt(txt,pin); }
+  catch(e){ throw new Error('הקוד לא פותח את הנתונים.'); }
+  if(!j||!j.counter) throw new Error('הנתונים שהגיעו לא בפורמט הנכון.');
+  DIAG.systems=(j.systems||[]).length;
+  DIAG.step='מוכן'; DIAG.err='';
   return j;
 }
 async function pull(){
   if(!GIST_ID||!PIN) return;
-  try{ D=await load(PIN); paint(); checkStale(); }
-  catch(e){ checkStale(); }
+  try{
+    D=await load(PIN);
+    try{ localStorage.setItem(CACHE_KEY, JSON.stringify(D)); }catch(_){}
+    paint(); status();
+  }catch(e){
+    DIAG.err = (e && e.message) ? e.message : String(e);
+    status();
+  }
 }
 function askPin(){
   var box=document.getElementById('lock'), inp=document.getElementById('pin');
@@ -1000,6 +1057,11 @@ function loop(now){
 }
 loop.t=performance.now();
 
+document.getElementById('stale').addEventListener('click', openDiag);
+document.getElementById('head').addEventListener('click', function(e){
+  if(e.target.closest('.chip') || DIAG.err) openDiag();
+});
+
 if(gl){
   try{
     initGL(); resize(); paint(); setView('now');
@@ -1007,9 +1069,11 @@ if(gl){
     window.addEventListener('orientationchange',function(){ setTimeout(function(){ resize(); measureHead(); },250); });
     requestAnimationFrame(loop);
     if(GIST_ID){
+      var cached=null; try{ cached=localStorage.getItem(CACHE_KEY); }catch(_){}
+      if(cached){ try{ var c=JSON.parse(cached); if(c&&c.counter){ D=c; paint(); } }catch(_){} }
       var saved=null; try{ saved=localStorage.getItem(STORE_KEY); }catch(_){}
       if(saved){ PIN=saved; pull(); } else askPin();
-      setInterval(pull,PULL_MS); setInterval(checkStale,30000);
+      setInterval(pull,PULL_MS); setInterval(status,30000);
     }
     setTimeout(function(){ document.getElementById('boot').classList.add('gone'); },520);
   }catch(err){
