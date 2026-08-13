@@ -97,6 +97,18 @@ canvas#sky{position:fixed;inset:0;width:100%;height:100%;display:block;z-index:0
 #brain .r .bar i{display:block;height:100%;border-radius:2px}
 #brain .none{font-size:13px;color:var(--dim);line-height:1.6}
 #brain .none b{color:var(--ink)}
+/* the two runners — the only things here that can be dead right now */
+#brain .run{display:flex;flex-direction:column;gap:6px;margin-bottom:11px;
+  padding-bottom:11px;border-bottom:1px solid rgba(255,255,255,.09)}
+#brain .rn{display:flex;align-items:center;gap:8px;font-size:12.5px}
+#brain .rn i{width:9px;height:9px;border-radius:50%;flex:none;background:currentColor;
+  box-shadow:0 0 10px currentColor}
+#brain .rn.ok i{color:var(--ok)} #brain .rn.warn i{color:var(--warn)}
+#brain .rn.bad i{color:var(--bad)} #brain .rn.off i{color:#4a5876;box-shadow:none}
+#brain .rn .k{font-weight:800;color:var(--ink);flex:none}
+#brain .rn .v{color:var(--dim);flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+#brain .rn .w{font-size:10px;color:var(--faint);flex:none;padding:2px 6px;border-radius:999px;
+  border:1px solid rgba(255,255,255,.10)}
 /* A phone on its side has no room below anything. The panel becomes a column
    down one edge and the head is pushed to the other, instead of the two of them
    fighting over the same three hundred pixels. */
@@ -215,10 +227,10 @@ canvas#sky{position:fixed;inset:0;width:100%;height:100%;display:block;z-index:0
   </div>
 </div>
 <div id="nav">
-  <button class="tab on" data-v="now">עכשיו</button>
+  <button class="tab" data-v="now">עכשיו</button>
   <button class="tab" data-v="count">המונה</button>
   <button class="tab" data-v="log">המסלול</button>
-  <button class="tab" data-v="brain">המוח</button>
+  <button class="tab on" data-v="brain">המוח</button>
 </div>
 
 <div id="brain"><div class="box"></div></div>
@@ -1526,7 +1538,11 @@ function draw(now, dt){
     gl.useProgram(PROG.bright);
     gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, FB.scene.tex);
     gl.uniform1i(PROG.bright.u.uS,0);
-    gl.uniform1f(PROG.bright.u.uThr, HDR?1.30:0.86);
+    /* The threshold has to match the scene, not a memory of another one. It was set
+       for a star that outputs values over two; the brain's brightest point is well
+       under one, so at 1.30 nothing in the head ever reached the bloom and the
+       organ came out grey. This is the board's own number. */
+    gl.uniform1f(PROG.bright.u.uThr, view==='brain' ? 0.70 : (HDR?1.30:0.86));
     fsQuad(PROG.bright);
     /* two separable blurs, twice, so the spill is wide and soft */
     for(var bp=0; bp<(QUAL?2:1); bp++){
@@ -1590,131 +1606,285 @@ function draw(now, dt){
 }
 
 /* ---------------- the brain ----------------
-   The board on the PC draws this head as a lit surface with nineteen thousand
-   points. A phone gets the honest cheap version of the same thing: the skin as
-   dust and one point per real task, from the identical arithmetic in geom.js —
-   so the two screens agree by construction rather than by being kept in step
-   by hand.
+   The same organ the board on the PC draws, and deliberately the same code
+   path: the shape comes out of geom.js, the surface out of the shaders below,
+   and both are copied from the desktop board rather than reinvented — two
+   screens that draw the same thing from two different sets of arithmetic drift
+   apart within a week.
 
-   The SHAPE is arithmetic and is built here on the device, which is why this
-   page can carry it: arithmetic is not content. The WORDS — what each domain is
-   called, how many tasks are done — are content, and content only ever reaches
-   this page inside the encrypted state. Until that arrives the shape is drawn
-   and the panel says plainly that the rest has not come yet. It does not guess.
-   ---------------------------------------------------------------- */
-var BR_S = 3.4;                     /* the head is about 1.35 across; this frames it */
-var BR_SKIN = null;                 /* the dust, built once — it never depends on data */
-var BR = null;                      /* buffers + tallies for what is currently drawn */
+   The SHAPE is arithmetic and is solved here on the device. The WORDS — the
+   domain names, what is done — are content, and content only ever reaches this
+   page inside the encrypted state. With no words the head still draws and the
+   panel says plainly that the rest has not arrived. It never guesses.
+   ------------------------------------------ */
+var BR=null, BR_WANT=false, BR_MESH=null, BR_SHELL=null, BR_NP=90;
 
 function brainData(){
   var b = D && D.brain;
   return (b && b.cells && b.cells.length && b.domains && b.domains.length) ? b : null;
 }
 
+function brainPrograms(){
+  if(PROG.bpt) return;
+  PROG.bpt = NX.program(gl,
+    "attribute vec3 aPos; attribute vec3 aCol; attribute vec2 aMeta; attribute float aOn;"+
+    "uniform mat4 uMVP; uniform float uPx; uniform vec3 uEye;"+
+    "varying vec3 vCol; varying float vKind; varying float vOn;"+
+    "void main(){ vec4 p=uMVP*vec4(aPos,1.0); gl_Position=p;"+
+    "  float w=max(p.w,0.08);"+
+    "  gl_PointSize=clamp(uPx*aMeta.x/w, 1.0, 120.0);"+
+    /* the skin is lit like a surface, not sprayed like confetti */
+    "  float sh=1.0;"+
+    "  if(aMeta.y>1.5){ vec3 n=normalize(aPos); vec3 vd=normalize(uEye-aPos);"+
+    "    float f=dot(n,vd); float rim=pow(1.0-abs(f),1.45);"+
+    "    sh = (f>0.0) ? (0.46+1.25*rim) : (0.07+0.34*rim); }"+
+    "  vCol=aCol; vKind=aMeta.y; vOn=aOn*sh; }",
+    "precision mediump float;"+
+    "varying vec3 vCol; varying float vKind; varying float vOn;"+
+    "void main(){ vec2 q=gl_PointCoord*2.0-1.0; float r=length(q); if(r>1.0) discard;"+
+    "  float a;"+
+    "  if(vKind>1.5){ a=exp(-r*r*3.4)*0.92; }"+
+    "  else if(vKind>0.5){ a=(exp(-r*r*6.5)+exp(-r*r*1.7)*0.32)*1.38; }"+
+    "  else if(vKind>2.5){ float ring=exp(-pow((r-0.72)/0.11,2.0));"+
+    "    a=(exp(-r*r*5.0)*0.50+ring*0.78)*1.08; }"+
+    "  else { float ring=exp(-pow((r-0.66)/0.18,2.0)); a=ring*1.05+exp(-r*r*9.0)*0.18; }"+
+    "  a*=vOn; if(a<=0.002) discard;"+
+    "  gl_FragColor=vec4(vCol*a, a); }");
+  PROG.bln = NX.program(gl,
+    "attribute vec3 aPos; attribute vec3 aCol; attribute float aOn;"+
+    "uniform mat4 uMVP; varying vec3 vCol; varying float vOn;"+
+    "void main(){ gl_Position=uMVP*vec4(aPos,1.0); vCol=aCol; vOn=aOn; }",
+    "precision mediump float; varying vec3 vCol; varying float vOn;"+
+    "void main(){ gl_FragColor=vec4(vCol*vOn, vOn); }");
+  /* the organ: glass, lit from two sides, brighter where the work is done */
+  PROG.bms = NX.program(gl,
+    "attribute vec3 aPos; attribute vec3 aNrm; attribute vec3 aCol; attribute float aF;"+
+    "uniform mat4 uMVP;"+
+    "varying vec3 vN; varying vec3 vP; varying vec3 vC; varying float vF;"+
+    "void main(){ vN=aNrm; vP=aPos; vC=aCol; vF=aF; gl_Position=uMVP*vec4(aPos,1.0); }",
+    "precision highp float;"+
+    "varying vec3 vN; varying vec3 vP; varying vec3 vC; varying float vF;"+
+    "uniform vec3 uEye; uniform float uFace;"+
+    "void main(){"+
+    "  vec3 N=normalize(vN); vec3 V=normalize(uEye-vP);"+
+    "  if(uFace<0.5) N=-N;"+
+    "  float fres=pow(1.0-clamp(dot(N,V),0.0,1.0), 2.05);"+
+    "  vec3 L1=normalize(vec3(0.42,0.86,0.62)), L2=normalize(vec3(-0.78,-0.16,-0.42));"+
+    "  float d1=max(dot(N,L1),0.0), d2=max(dot(N,L2),0.0);"+
+    "  vec3 c = vec3(0.078,0.104,0.242)*(0.03+1.70*d1) + vec3(0.140,0.048,0.222)*d2*0.72;"+
+    "  vec3 H=normalize(L1+V); float sp=pow(max(dot(N,H),0.0),44.0);"+
+    "  c += vec3(0.55,0.72,1.0)*sp*0.38;"+
+    "  c += vC*(0.26+0.80*fres);"+
+    "  c += vec3(0.36,0.60,1.0)*fres*0.30;"+
+    /* the fissure is a shadow in the shader, never a cut in the geometry */
+    "  float mid=smoothstep(0.0,0.115,abs(vP.x));"+
+    "  float fis = (vP.y>0.02) ? (0.20+0.80*mid) : 1.0;"+
+    "  c *= fis * (0.38+0.62*vF);"+
+    "  float a = (0.016 + 0.58*fres) * (0.35+0.65*fis);"+
+    "  a *= (uFace<0.5 ? 0.17 : 1.0);"+
+    "  gl_FragColor=vec4(c*a, a); }");
+}
+
+/* The heavy part: about nineteen thousand surface points, each found by
+   marching a ray until the field flips. It costs the better part of a second,
+   so it happens once, the first time the head is actually asked for — nobody
+   pays for a view they never opened. */
 function buildBrain(){
   if(typeof NXGEOM==='undefined') return null;
-  var bd  = brainData();
+  var bd=brainData();
   var key = bd ? bd.cells.map(function(c){ return c.id+(c.d===true?'1':c.d==='pre'?'p':'0'); }).join(',') : '-';
   if(BR && BR.key===key) return BR;
-  if(!BR_SKIN) BR_SKIN = NXGEOM.buildShell();
+  brainPrograms();
+  if(!BR_MESH){ BR_MESH=NXGEOM.buildMesh(); BR_SHELL=NXGEOM.buildShell(); }
+  var MESH=BR_MESH, SHELL=BR_SHELL;
 
   var DC={}; if(bd) bd.domains.forEach(function(d){ DC[d.k]=d; });
   var colOf=function(k){ return hex2rgb((DC[k]||{c:'#8fa6cf'}).c); };
 
-  var cells=[];
+  /* cells, in the board's order: done first, then prior work, then waiting */
+  var C=[];
   if(bd){
-    /* the same order the board uses: done first, then prior work, then waiting —
-       so a cell keeps its place on both screens */
     var rank=function(c){ return c.d===true?0:(c.d==='pre'?1:2); };
     bd.cells.map(function(c,i){ return {c:c,i:i}; })
       .sort(function(a,b){ return rank(a.c)-rank(b.c) || a.i-b.i; })
-      .forEach(function(o){ cells.push({ c:o.c, p:NXGEOM.place(o.c,o.i) }); });
+      .forEach(function(o){
+        var c=o.c;
+        C.push({ id:c.id, dom:c.dom, done:c.d===true, pre:c.d==='pre',
+                 lit:(c.d===true||c.d==='pre'), p:NXGEOM.place(c,o.i),
+                 col:colOf(c.dom) });
+      });
   }
-
-  var n = BR_SKIN.length + cells.length;
-  var P=new Float32Array(n*3), Sz=new Float32Array(n), Ph=new Float32Array(n), Cl=new Float32Array(n*3);
-  var w=0;
-  BR_SKIN.forEach(function(s){
-    P[w*3]=s.x*BR_S; P[w*3+1]=s.y*BR_S; P[w*3+2]=s.z*BR_S;
-    /* the skin only hints at the colour; the tasks carry it. Kept low on purpose:
-       the bloom pass burns to white if the dust is allowed to be bright. */
-    var c=colOf(s.dom), f=0.16+Math.pow(s.f,1.6)*0.26;
-    Cl[w*3]=(c[0]*0.45+0.32)*f; Cl[w*3+1]=(c[1]*0.45+0.34)*f; Cl[w*3+2]=(c[2]*0.45+0.40)*f;
-    Sz[w]=0.34; Ph[w]=s.f;
-    w++;
-  });
   var tal={}, done=0, pre=0;
   if(bd) bd.domains.forEach(function(d){ tal[d.k]={done:0,pre:0,tot:0}; });
-  cells.forEach(function(o,i){
-    var c=o.c, isDone=c.d===true, isPre=c.d==='pre';
-    P[w*3]=o.p[0]*BR_S; P[w*3+1]=o.p[1]*BR_S; P[w*3+2]=o.p[2]*BR_S;
-    var col=colOf(c.dom), k = isDone?1.00 : isPre?0.46 : 0.13;
-    Cl[w*3]=col[0]*k; Cl[w*3+1]=col[1]*k; Cl[w*3+2]=col[2]*k;
-    Sz[w] = isDone?1.55 : isPre?1.15 : 0.80;
-    Ph[w] = (i%17)/17;
-    w++;
-    var t=tal[c.dom]; if(t){ t.tot++; if(isDone){t.done++;} if(isPre){t.pre++;} }
-    if(isDone) done++; if(isPre) pre++;
-  });
+  C.forEach(function(c){ var t=tal[c.dom];
+    if(t){ t.tot++; if(c.done)t.done++; if(c.pre)t.pre++; }
+    if(c.done)done++; if(c.pre)pre++; });
 
-  if(BR && BR.buf){ ['p','s','ph','c'].forEach(function(k){ gl.deleteBuffer(BR.buf[k]); }); }
-  BR = { key:key, n:n, cells:cells.length, done:done, pre:pre, tal:tal,
-         buf:{ p:NX.buf(gl,P), s:NX.buf(gl,Sz), ph:NX.buf(gl,Ph), c:NX.buf(gl,Cl) } };
+  /* axons: each cell reaches for its two nearest neighbours in its own domain,
+     plus a few long fibres across the midline so the halves read as one organ */
+  var EDGES=[];
+  (function(){
+    var seen={};
+    for(var i=0;i<C.length;i++){
+      var best=[];
+      for(var j=0;j<C.length;j++){
+        if(i===j || C[j].dom!==C[i].dom) continue;
+        var dx=C[i].p[0]-C[j].p[0], dy=C[i].p[1]-C[j].p[1], dz=C[i].p[2]-C[j].p[2];
+        best.push({j:j,d:dx*dx+dy*dy+dz*dz});
+      }
+      best.sort(function(a,b){ return a.d-b.d; });
+      for(var k=0;k<Math.min(2,best.length);k++){
+        var a=Math.min(i,best[k].j), b=Math.max(i,best[k].j), key2=a+'_'+b;
+        if(seen[key2]) continue; seen[key2]=1;
+        EDGES.push({a:a,b:b});
+      }
+    }
+    var r=NXGEOM.rng(9137);
+    for(var n=0;n<26;n++){
+      var a2=(r()*C.length)|0, b2=(r()*C.length)|0;
+      if(a2===b2 || !C[a2] || !C[b2] || C[a2].p[0]*C[b2].p[0]>0) continue;
+      EDGES.push({a:Math.min(a2,b2), b:Math.max(a2,b2), cross:true});
+    }
+  })();
+
+  /* the skin takes its colour from how far its own domain has got */
+  var mcol=new Float32Array(MESH.n*3);
+  for(var i=0;i<MESH.n;i++){
+    var t2=tal[MESH.dom[i]]||{done:0,pre:0,tot:1};
+    var pr=t2.tot?(t2.done+t2.pre)/t2.tot:0, c2=colOf(MESH.dom[i]), kk=0.030+0.230*pr;
+    mcol[i*3]=c2[0]*kk; mcol[i*3+1]=c2[1]*kk; mcol[i*3+2]=c2[2]*kk;
+  }
+
+  var nCell=C.length, nDust=SHELL.length, nEdge=EDGES.length;
+  var cp=new Float32Array(nCell*3), cc=new Float32Array(nCell*3), cm=new Float32Array(nCell*2), co=new Float32Array(nCell);
+  C.forEach(function(c,i){
+    cp[i*3]=c.p[0]; cp[i*3+1]=c.p[1]; cp[i*3+2]=c.p[2];
+    cc[i*3]=c.col[0]; cc[i*3+1]=c.col[1]; cc[i*3+2]=c.col[2];
+    cm[i*2]=c.done?0.98:(c.pre?0.90:0.92); cm[i*2+1]=c.done?1:(c.pre?3:0);
+  });
+  var dp=new Float32Array(nDust*3), dc=new Float32Array(nDust*3), dm=new Float32Array(nDust*2), doo=new Float32Array(nDust);
+  SHELL.forEach(function(s,i){
+    dp[i*3]=s.x; dp[i*3+1]=s.y; dp[i*3+2]=s.z;
+    var c3=colOf(s.dom), f=0.40+Math.pow(s.f,1.5)*0.80, mixw=0.52;
+    dc[i*3]  =(c3[0]*(1-mixw)+0.60*mixw)*f;
+    dc[i*3+1]=(c3[1]*(1-mixw)+0.64*mixw)*f;
+    dc[i*3+2]=(c3[2]*(1-mixw)+0.78*mixw)*f;
+    dm[i*2]=0.070+s.f*0.080; dm[i*2+1]=2;
+  });
+  var ep=new Float32Array(nEdge*6), ec=new Float32Array(nEdge*6), eo=new Float32Array(nEdge*2);
+  EDGES.forEach(function(e,i){
+    var A=C[e.a], B2=C[e.b];
+    for(var k2=0;k2<3;k2++){ ep[i*6+k2]=A.p[k2]; ep[i*6+3+k2]=B2.p[k2];
+                             ec[i*6+k2]=A.col[k2]; ec[i*6+3+k2]=B2.col[k2]; }
+  });
+  var pulse=[], pp=new Float32Array(BR_NP*3), pc=new Float32Array(BR_NP*3), pm=new Float32Array(BR_NP*2), po=new Float32Array(BR_NP);
+  for(var q=0;q<BR_NP;q++){ pulse.push({e:(Math.random()*Math.max(1,nEdge))|0, t:Math.random(), v:0.26+Math.random()*0.5});
+                            pm[q*2]=0.26; pm[q*2+1]=1; }
+
+  if(BR && BR.buf) for(var b3 in BR.buf) gl.deleteBuffer(BR.buf[b3]);
+  var mi=gl.createBuffer();
+  gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER,mi);
+  gl.bufferData(gl.ELEMENT_ARRAY_BUFFER,MESH.idx,gl.STATIC_DRAW);
+
+  BR={ key:key, C:C, EDGES:EDGES, tal:tal, done:done, pre:pre, cells:nCell,
+       nDust:nDust, nEdge:nEdge, pulse:pulse, ni:MESH.ni, t0:performance.now(),
+       arr:{ co:co, doo:doo, eo:eo, pp:pp, pc:pc, po:po },
+       buf:{ mp:NX.buf(gl,MESH.pos), mn:NX.buf(gl,MESH.nrm), mc:NX.buf(gl,mcol), mf:NX.buf(gl,MESH.fld),
+             cp:NX.buf(gl,cp), cc:NX.buf(gl,cc), cm:NX.buf(gl,cm), co:NX.buf(gl,co),
+             dp:NX.buf(gl,dp), dc:NX.buf(gl,dc), dm:NX.buf(gl,dm), doo:NX.buf(gl,doo),
+             ep:NX.buf(gl,ep), ec:NX.buf(gl,ec), eo:NX.buf(gl,eo),
+             pp:NX.buf(gl,pp), pc:NX.buf(gl,pc), pm:NX.buf(gl,pm), po:NX.buf(gl,po) },
+       mi:mi };
   return BR;
 }
 
-/* Where the head has to sit so the panel does not cover it. Upright the panel is
-   a card along the bottom, so the head is pushed up and pulled back; on its side
-   the panel is a column down the left, so the head goes right instead. The
-   numbers were read off the panel's measured box, not guessed. */
+function bupd(b,a){ gl.bindBuffer(gl.ARRAY_BUFFER,b); gl.bufferData(gl.ARRAY_BUFFER,a,gl.DYNAMIC_DRAW); }
+function battr(prog,name,b,size){
+  var l=prog.a[name]; if(l===undefined||l<0) return;
+  gl.bindBuffer(gl.ARRAY_BUFFER,b); gl.enableVertexAttribArray(l);
+  gl.vertexAttribPointer(l,size,gl.FLOAT,false,0,0);
+}
+function bpoints(bf,cb,mb,ob,n){
+  gl.useProgram(PROG.bpt);
+  gl.uniformMatrix4fv(PROG.bpt.u.uMVP,false,mVP);
+  gl.uniform1f(PROG.bpt.u.uPx, 0.055*cv.height);
+  gl.uniform3fv(PROG.bpt.u.uEye, eye);
+  battr(PROG.bpt,'aPos',bf,3); battr(PROG.bpt,'aCol',cb,3);
+  battr(PROG.bpt,'aMeta',mb,2); battr(PROG.bpt,'aOn',ob,1);
+  gl.drawArrays(gl.POINTS,0,n);
+}
+function bmesh(front){
+  gl.useProgram(PROG.bms);
+  gl.uniformMatrix4fv(PROG.bms.u.uMVP,false,mVP);
+  gl.uniform3fv(PROG.bms.u.uEye, eye);
+  gl.uniform1f(PROG.bms.u.uFace, front?1:0);
+  battr(PROG.bms,'aPos',BR.buf.mp,3); battr(PROG.bms,'aNrm',BR.buf.mn,3);
+  battr(PROG.bms,'aCol',BR.buf.mc,3); battr(PROG.bms,'aF',BR.buf.mf,1);
+  gl.enable(gl.CULL_FACE); gl.cullFace(front? gl.BACK : gl.FRONT);
+  gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER,BR.mi);
+  gl.drawElements(gl.TRIANGLES,BR.ni,gl.UNSIGNED_SHORT,0);
+  gl.disable(gl.CULL_FACE);
+}
+
+/* Where the head sits so the panel does not cover it. The head is about 1.35
+   across and sits at the origin, so these come off the lens — upright the panel
+   is a card along the bottom and the head is pushed up; on its side the panel is
+   a column down the left and the head goes right. */
 function brainFrame(){
   var land = window.innerHeight <= 560 && window.innerWidth > window.innerHeight;
-  return land ? { dist: baseDist()*1.30, y: 0.02, x: -0.46 }
-              : { dist: baseDist()*1.21, y:-0.35, x: 0 };
+  return land ? { dist: 5.2, y: 0.02, x: -0.46 }
+              : { dist: 6.1, y:-0.34, x: 0 };
 }
 
 function drawBrain(now, dt){
   var b=buildBrain();
   if(!b) return;
-  gl.enable(gl.BLEND); gl.blendFunc(gl.ONE,gl.ONE);
-  gl.disable(gl.DEPTH_TEST); gl.depthMask(false);
-  gl.useProgram(PROG.star);
-  gl.uniformMatrix4fv(PROG.star.u.uV,false,mV);
-  gl.uniformMatrix4fv(PROG.star.u.uP,false,mP);
-  gl.uniform1f(PROG.star.u.uPix, cv.height*0.5/Math.tan(FOV/2));
-  gl.uniform1f(PROG.star.u.uT, now/1000);
-  bindAttr(PROG.star.a.aP, b.buf.p, 3);
-  bindAttr(PROG.star.a.aS, b.buf.s, 1);
-  bindAttr(PROG.star.a.aPh,b.buf.ph,1);
-  bindAttr(PROG.star.a.aC, b.buf.c, 3);
-  gl.drawArrays(gl.POINTS,0,b.n);
+  var t=(now-b.t0)/1000, A=b.arr;
 
-  /* The couriers and the ships belong here too. They already fly between the
-     planets in the other view; inside the head they run the same arcs, scaled
-     to it — because the traffic is the project working, and the project works
-     in here as much as it works out there. Aliens stay outside: their speech
-     bubbles are placed against the planets and would land on nothing. */
-  gl.blendFunc(gl.ONE,gl.ONE);
-  var S=BR_S/4.6;                       /* solar-system distances into head-sized ones */
-  for(var i=0;i<couriers.length;i++){
-    var c=couriers[i], p, cc;
-    if(c.link){ p=NX.arcAt(c.link.a.pos, c.link.b.pos, c.link.bow, c.t); cc=c.link.a.col; }
-    else { p=[c.b.pos[0]*c.t, c.b.pos[1]*c.t+Math.sin(c.t*Math.PI)*0.45, c.b.pos[2]*c.t]; cc=c.b.col; }
-    var f=Math.sin(c.t*Math.PI);
-    p=[p[0]*S,p[1]*S,p[2]*S];
-    glowQuad(p, 0.30, cc, f*0.85, 2.2);
-    glowQuad(p, 0.11, [1,1,1], f*0.85, 3.4);
+  /* the head arrives rather than appearing: cells light in the order they were
+     finished, so the picture builds itself the way the project did */
+  for(var i=0;i<b.C.length;i++){
+    var c=b.C[i];
+    var want=(t>0.35+i*0.010)?1:0;
+    c.vis=(c.vis===undefined?0:c.vis); c.vis+=(want-c.vis)*Math.min(1,dt*3.2);
+    var up=c.done?(0.86+0.14*Math.sin(t*1.5+i*0.9)):(c.pre?0.66:0.52);
+    A.co[i]=c.vis*up;
   }
-  for(var s=0;s<ships.length;s++){
-    var sh=ships[s];
-    var pp=[sh.pos[0]*S, sh.pos[1]*S, sh.pos[2]*S];
-    var bk=[pp[0]-sh.dir[0]*S*0.17, pp[1]-sh.dir[1]*S*0.17, pp[2]-sh.dir[2]*S*0.17];
-    glowQuad(bk, 0.18, sh.glow, 0.55, 2.8);
-    glowQuad(bk, 0.08, [0.85,0.95,1.0], 0.90, 3.8);
-    glowQuad([pp[0]-sh.dir[0]*S*0.45, pp[1]-sh.dir[1]*S*0.45, pp[2]-sh.dir[2]*S*0.45],
-             0.26, sh.glow, 0.12, 2.0);
+  bupd(b.buf.co,A.co);
+  var reveal=Math.min(1,Math.max(0,(t-0.2)/2.2));
+  for(i=0;i<b.nDust;i++) A.doo[i]=reveal*0.30;
+  bupd(b.buf.doo,A.doo);
+  for(var e=0;e<b.nEdge;e++){
+    var ed=b.EDGES[e], ca=b.C[ed.a], cb=b.C[ed.b];
+    var base=(ca.lit&&cb.lit)?0.095:0.032; if(ed.cross) base*=0.7;
+    var v=Math.min(ca.vis||0,cb.vis||0)*base;
+    A.eo[e*2]=v; A.eo[e*2+1]=v;
   }
-  gl.enable(gl.DEPTH_TEST); gl.depthMask(true);
+  bupd(b.buf.eo,A.eo);
+  for(var q=0;q<BR_NP;q++){
+    var pu=b.pulse[q]; pu.t+=dt*pu.v;
+    if(pu.t>1){ pu.t=0; pu.e=(Math.random()*Math.max(1,b.nEdge))|0; }
+    var ee=b.EDGES[pu.e]; if(!ee){ A.po[q]=0; continue; }
+    var P1=b.C[ee.a], P2=b.C[ee.b], u=pu.t;
+    A.pp[q*3]  =P1.p[0]+(P2.p[0]-P1.p[0])*u;
+    A.pp[q*3+1]=P1.p[1]+(P2.p[1]-P1.p[1])*u;
+    A.pp[q*3+2]=P1.p[2]+(P2.p[2]-P1.p[2])*u;
+    for(var k=0;k<3;k++) A.pc[q*3+k]=P1.col[k]*(1-u)+P2.col[k]*u;
+    A.po[q]=Math.sin(u*3.14159)*0.85*Math.min(P1.vis||0,P2.vis||0)*((P1.lit&&P2.lit)?1:0.35);
+  }
+  bupd(b.buf.pp,A.pp); bupd(b.buf.pc,A.pc); bupd(b.buf.po,A.po);
+
+  gl.disable(gl.DEPTH_TEST); gl.enable(gl.BLEND); gl.blendFunc(gl.ONE,gl.ONE);
+  bmesh(false);
+  bpoints(b.buf.dp,b.buf.dc,b.buf.dm,b.buf.doo,b.nDust);
+  gl.useProgram(PROG.bln);
+  gl.uniformMatrix4fv(PROG.bln.u.uMVP,false,mVP);
+  battr(PROG.bln,'aPos',b.buf.ep,3); battr(PROG.bln,'aCol',b.buf.ec,3); battr(PROG.bln,'aOn',b.buf.eo,1);
+  gl.drawArrays(gl.LINES,0,b.nEdge*2);
+  bpoints(b.buf.pp,b.buf.pc,b.buf.pm,b.buf.po,BR_NP);
+  bpoints(b.buf.cp,b.buf.cc,b.buf.cm,b.buf.co,b.cells);
+  bmesh(true);
+  gl.enable(gl.DEPTH_TEST);
 }
 
 function paintBrainPanel(){
@@ -1729,7 +1899,27 @@ function paintBrainPanel(){
   }
   var b=buildBrain(); if(!b) return;
   var tot=b.cells, lit=b.done+b.pre, pct=tot?Math.round(lit/tot*100):0;
-  var h='<div class="ttl"><b>המוח</b><span>כל נקודה היא משימה אמיתית</span>'+
+
+  /* The two runners, at the top, because they are the only things on this
+     screen that can be dead right now. They are not equal and are not drawn as
+     if they were: the engine has a real pulse it writes every few minutes, so
+     "alive" is a measurement. The eye has no pulse — all it leaves behind is
+     when its last build finished — so it is labelled as the last build and
+     never as a heartbeat. Calling that a pulse would be inventing one. */
+  var sysById={}; (D.systems||[]).forEach(function(x){ sysById[x.id]=x; });
+  var runner=function(sys, name, kind){
+    if(!sys) return '<div class="rn off"><i></i><span class="k">'+name+'</span>'+
+                    '<span class="v">לא נמדד</span></div>';
+    var cls={ok:'ok',watch:'warn',bad:'bad',idle:'off'}[sys.state]||'off';
+    return '<div class="rn '+cls+'"><i></i><span class="k">'+name+'</span>'+
+           '<span class="v">'+esc(sys.val||'')+'</span>'+
+           '<span class="w">'+kind+'</span></div>';
+  };
+  var h='<div class="run">'+
+        runner(sysById.code,'קלוד קוד','דופק חי')+
+        runner(sysById.eye,'העין','בנייה אחרונה')+
+        '</div>'+
+        '<div class="ttl"><b>המוח</b><span>כל נקודה היא משימה אמיתית</span>'+
         '<span class="pc">'+pct+'%</span></div>'+
         '<div class="sum">'+lit+' תאים קיימים מתוך '+tot+'. <b style="color:var(--ink)">'+b.done+
         '</b> אומתו · '+b.pre+' נבנו קודם · '+(tot-lit)+' ממתינים.</div><div class="rows">';
@@ -2412,7 +2602,7 @@ document.getElementById('head').addEventListener('click', function(e){
 
 if(gl){
   try{
-    initGL(); resize(); paint(); setView('now');
+    initGL(); resize(); paint(); setView('brain');
     window.addEventListener('resize',function(){ resize(); measureHead(); });
     window.addEventListener('orientationchange',function(){ setTimeout(function(){ resize(); measureHead(); },250); });
     requestAnimationFrame(loop);
