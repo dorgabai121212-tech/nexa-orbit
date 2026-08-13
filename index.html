@@ -925,6 +925,30 @@ function initGL(){
     " c+=alb*uE;"+
     " gl_FragColor=vec4(c,1.0); }");
 
+  /* Hulls: ships and the workers at the star. One light, and it is the star at
+     the origin — the same light everything else in the scene is lit by, which is
+     the whole reason a metal panel reads as metal here. */
+  PROG.hull = NX.program(gl,
+    "attribute vec3 aP,aN,aC; attribute float aE; uniform mat4 uMVP,uM;"+
+    "varying vec3 vN,vW,vC; varying float vE;"+
+    "void main(){ vec4 w=uM*vec4(aP,1.0); vW=w.xyz;"+
+    " vN=normalize((uM*vec4(aN,0.0)).xyz); vC=aC; vE=aE;"+
+    " gl_Position=uMVP*vec4(aP,1.0); }",
+    "precision mediump float; varying vec3 vN,vW,vC; varying float vE;"+
+    "uniform vec3 uEye;"+
+    "void main(){ vec3 N=normalize(vN), L=normalize(-vW), V=normalize(uEye-vW);"+
+    " float d=max(dot(N,L),0.0);"+
+    " float rim=pow(1.0-max(dot(N,V),0.0),2.6);"+
+    " vec3 sun=vec3(1.00,0.86,0.62);"+
+    " vec3 c=vC*(0.085+0.95*d)*sun;"+
+    " vec3 H=normalize(L+V);"+
+    " c+=sun*pow(max(dot(N,H),0.0),42.0)*0.40*d;"+
+    /* the cold fill is what stops the unlit side going to flat black — in space
+       the only thing filling a shadow is everything else in the sky */
+    " c+=vec3(0.40,0.58,1.00)*rim*0.44;"+
+    " c+=vC*vE*3.4;"+
+    " gl_FragColor=vec4(c,1.0); }");
+
   PROG.glow = NX.program(gl,
     "attribute vec2 aQ; uniform mat4 uVP; uniform vec3 uCen,uR,uU; uniform float uS;"+
     "varying vec2 vQ; void main(){ vQ=aQ; vec3 w=uCen+uR*(aQ.x*uS)+uU*(aQ.y*uS);"+
@@ -968,6 +992,8 @@ function initGL(){
   BUF.sphN = NX.buf(gl, GEO.sph.nrm);
   BUF.sphI = NX.buf(gl, GEO.sph.idx, gl.ELEMENT_ARRAY_BUFFER);
   GEO.sphCount = GEO.sph.idx.length;
+  GEO.ship = buildShip();
+  GEO.worker = buildWorker();
 
   var rg = NX.torusArc(1.0, 0.055, Math.PI*2, 96, 6);
   BUF.ringP = NX.buf(gl, rg.pos);
@@ -1187,6 +1213,162 @@ function drawStages(now){
     if(cur)  ringQuad(pos, 0.30*pulse, [1.0,0.90,0.60], 0.55, 0.10);
   }
 }
+/* ================= hulls =================
+   Ships and the workers at the star used to be glowing dots, and the reason was
+   arithmetic, not laziness: at the orbit distance a ship is about fourteen
+   pixels across, and no model survives fourteen pixels. So the ships were moved
+   instead of shrunk — they now fly through the near field, between the camera
+   and the star, where a unit of world is a hundred and forty pixels instead of
+   fifty-eight, and a hull reads as a hull.
+
+   Everything below is generated as boxes in JavaScript, the same way the sphere
+   already was. No model file, no loader, no CDN — it still opens from a folder
+   with the aeroplane mode on.
+   ========================================= */
+function meshAcc(){ return {p:[],n:[],c:[],e:[],i:[]}; }
+function pushQuad(a, v0,v1,v2,v3, col, emi, ctr){
+  var base=a.p.length/3;
+  var ux=[v1[0]-v0[0],v1[1]-v0[1],v1[2]-v0[2]], uy=[v3[0]-v0[0],v3[1]-v0[1],v3[2]-v0[2]];
+  var nx=ux[1]*uy[2]-ux[2]*uy[1], ny=ux[2]*uy[0]-ux[0]*uy[2], nz=ux[0]*uy[1]-ux[1]*uy[0];
+  var L=Math.hypot(nx,ny,nz)||1; nx/=L; ny/=L; nz/=L;
+  /* nothing is culled here, so winding is free — but the normal has to point
+     away from the body or every panel lights from the wrong side */
+  if((v0[0]-ctr[0])*nx+(v0[1]-ctr[1])*ny+(v0[2]-ctr[2])*nz < 0){ nx=-nx; ny=-ny; nz=-nz; }
+  var vs=[v0,v1,v2,v3];
+  for(var k=0;k<4;k++){ a.p.push(vs[k][0],vs[k][1],vs[k][2]); a.n.push(nx,ny,nz);
+                        a.c.push(col[0],col[1],col[2]); a.e.push(emi); }
+  a.i.push(base,base+1,base+2, base,base+2,base+3);
+}
+/* a box whose +z face may be narrowed, which is all a nose or a swept wing is */
+function pushBox(a, c, h, col, emi, taper){
+  var f=(taper===undefined)?1:taper;
+  function P(sx,sy,sz){ var s=(sz>0)?f:1;
+    return [c[0]+sx*h[0]*s, c[1]+sy*h[1]*s, c[2]+sz*h[2]]; }
+  var A=P(-1,-1,-1),B=P(1,-1,-1),C=P(1,1,-1),Dd=P(-1,1,-1);
+  var E=P(-1,-1, 1),F=P(1,-1, 1),G=P(1,1, 1),H=P(-1,1, 1);
+  pushQuad(a,E,F,G,H,col,emi,c); pushQuad(a,A,B,C,Dd,col,emi,c);
+  pushQuad(a,B,F,G,C,col,emi,c); pushQuad(a,E,A,Dd,H,col,emi,c);
+  pushQuad(a,H,G,C,Dd,col,emi,c); pushQuad(a,A,B,F,E,col,emi,c);
+}
+function uploadMesh(a){
+  return { p:NX.buf(gl,new Float32Array(a.p)), n:NX.buf(gl,new Float32Array(a.n)),
+           c:NX.buf(gl,new Float32Array(a.c)), e:NX.buf(gl,new Float32Array(a.e)),
+           i:(function(){ var b=gl.createBuffer();
+                gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER,b);
+                gl.bufferData(gl.ELEMENT_ARRAY_BUFFER,new Uint16Array(a.i),gl.STATIC_DRAW);
+                return b; })(),
+           n_i:a.i.length };
+}
+
+/* nose down +z, so NX.modelDir points it along its own flight path */
+function buildShip(){
+  var a=meshAcc();
+  var hull=[0.33,0.37,0.45], plate=[0.54,0.59,0.68], dark=[0.13,0.15,0.21];
+  pushBox(a,[0,0,0.02],[0.085,0.070,0.40],hull,0,0.34);          /* fuselage, nose tapered */
+  pushBox(a,[0,0.080,-0.02],[0.052,0.045,0.17],plate,0,0.55);    /* spine */
+  pushBox(a,[0,0.052,0.16],[0.040,0.030,0.075],[0.30,0.62,0.85],0.55,0.6); /* canopy */
+  pushBox(a,[ 0.21,-0.010,-0.10],[0.150,0.015,0.185],plate,0,0.30);
+  pushBox(a,[-0.21,-0.010,-0.10],[0.150,0.015,0.185],plate,0,0.30);
+  pushBox(a,[ 0.345,0,-0.13],[0.026,0.026,0.105],hull,0);
+  pushBox(a,[-0.345,0,-0.13],[0.026,0.026,0.105],hull,0);
+  pushBox(a,[0,0.115,-0.30],[0.012,0.075,0.075],dark,0,0.5);     /* fin */
+  pushBox(a,[ 0.105,-0.020,-0.40],[0.046,0.046,0.070],dark,0);
+  pushBox(a,[-0.105,-0.020,-0.40],[0.046,0.046,0.070],dark,0);
+  pushBox(a,[ 0.105,-0.020,-0.455],[0.036,0.036,0.012],[0.55,0.85,1.0],1.0); /* thrust */
+  pushBox(a,[-0.105,-0.020,-0.455],[0.036,0.036,0.012],[0.55,0.85,1.0],1.0);
+  return uploadMesh(a);
+}
+/* a worker: standing on +y, facing +z. Arms are separate so they can move. */
+function buildWorker(){
+  var b=meshAcc();
+  var suit=[0.30,0.36,0.46], trim=[0.62,0.70,0.82];
+  pushBox(b,[0,0.30,0],[0.098,0.155,0.070],suit,0,0.86);          /* torso */
+  pushBox(b,[0,0.155,0],[0.070,0.030,0.055],trim,0);              /* belt */
+  pushBox(b,[0,0.545,0],[0.072,0.082,0.068],suit,0,0.92);         /* helmet */
+  pushBox(b,[0,0.545,0.062],[0.050,0.040,0.012],[0.45,0.95,0.80],0.85); /* visor */
+  pushBox(b,[ 0.052,0.075,0],[0.031,0.078,0.036],suit,0);         /* legs */
+  pushBox(b,[-0.052,0.075,0],[0.031,0.078,0.036],suit,0);
+  pushBox(b,[0,0.40,-0.075],[0.055,0.075,0.030],trim,0);          /* pack */
+  var arm=meshAcc();
+  pushBox(arm,[0,-0.115,0],[0.028,0.118,0.028],[0.34,0.40,0.52],0);
+  pushBox(arm,[0,-0.245,0],[0.034,0.026,0.034],[0.95,0.72,0.30],0.90); /* the tool */
+  return { body:uploadMesh(b), arm:uploadMesh(arm) };
+}
+
+/* translate * rotate-about-x, written straight into a mat4 — a shoulder */
+function limbMatrix(px,py,pz, ang, s, o){
+  var c=Math.cos(ang), sn=Math.sin(ang);
+  o[0]=s; o[1]=0;    o[2]=0;     o[3]=0;
+  o[4]=0; o[5]=c*s;  o[6]=sn*s;  o[7]=0;
+  o[8]=0; o[9]=-sn*s;o[10]=c*s;  o[11]=0;
+  o[12]=px; o[13]=py; o[14]=pz;  o[15]=1;
+  return o;
+}
+
+/* The hulls are solid, so they need the depth buffer and ordinary blending; the
+   engines and the tool sparks are light, so they need neither. The two are drawn
+   as two passes rather than interleaved, because switching that state per object
+   is how a frame ends up with a ship glowing through a planet. */
+function drawFleet(now){
+  if(!PROG.hull || !GEO.ship || (!ships.length && !aliens.length)) return;
+
+  gl.disable(gl.BLEND); gl.enable(gl.DEPTH_TEST); gl.depthMask(true);
+  gl.useProgram(PROG.hull);
+  gl.uniform3fv(PROG.hull.u.uEye, eye);
+
+  for(var s=0; s<ships.length; s++){
+    var sh=ships[s], k=sh.size;
+    NX.modelDir(sh.pos, sh.dir, [k,k,k], mHull);
+    drawHull(GEO.ship, mHull);
+  }
+  for(var i=0; i<aliens.length; i++){
+    var al=aliens[i], sc=1.05;
+    /* facing the star, because that is what they are working on */
+    NX.modelScale(al.pos, [sc,sc,sc], -al.ang+Math.PI/2, mHull);
+    drawHull(GEO.worker.body, mHull);
+    /* both arms up at the work, swinging out of phase so it reads as effort */
+    var sw=Math.sin(now/380+al.phase);
+    for(var arm=0; arm<2; arm++){
+      var side=arm? 1 : -1;
+      limbMatrix(side*0.118, 0.415, 0.010, -0.72+sw*(arm?0.26:-0.26), 1.0, mHull2);
+      NX.mul(mHull, mHull2, mArm);
+      drawHull(GEO.worker.arm, mArm);
+    }
+  }
+
+  /* pass two: the light they make */
+  gl.enable(gl.BLEND); gl.blendFunc(gl.ONE,gl.ONE); gl.depthMask(false);
+  for(s=0; s<ships.length; s++){
+    var sp=ships[s], d=sp.dir, dl=Math.hypot(d[0],d[1],d[2])||1;
+    var ux=d[0]/dl, uy=d[1]/dl, uz=d[2]/dl, kk=sp.size;
+    function at(o){ return [sp.pos[0]-ux*kk*o, sp.pos[1]-uy*kk*o, sp.pos[2]-uz*kk*o]; }
+    glowQuad(at(0.46), 0.30*kk, sp.glow, 0.95, 3.4);
+    glowQuad(at(0.62), 0.44*kk, sp.glow, 0.34, 2.4);
+    glowQuad(at(1.15), 0.62*kk, sp.glow, 0.10, 1.8);   /* the wake */
+  }
+  for(i=0; i<aliens.length; i++){
+    var a2=aliens[i], f=Math.sin(Math.min(1,a2.t)*Math.PI);
+    var sw2=Math.sin(now/380+a2.phase);
+    /* the tool tip, where the arm swings to */
+    var tip=[a2.pos[0], a2.pos[1]+0.34+sw2*0.05, a2.pos[2]];
+    glowQuad(tip, 0.20, [1.0,0.80,0.36], 0.85*f, 3.6);
+    glowQuad(tip, 0.44, [1.0,0.62,0.24], 0.22*f, 2.2);
+    glowQuad([a2.pos[0],a2.pos[1]+0.20,a2.pos[2]], 0.62, [0.30,0.95,0.70], 0.10*f, 2.0);
+  }
+  gl.depthMask(true);
+}
+
+var mHull=NX.m4(), mHull2=NX.m4(), mArm=NX.m4();
+function drawHull(mesh, M){
+  NX.mul(mVP, M, mHull2);
+  gl.uniformMatrix4fv(PROG.hull.u.uMVP,false,mHull2);
+  gl.uniformMatrix4fv(PROG.hull.u.uM,false,M);
+  bindAttr(PROG.hull.a.aP,mesh.p,3); bindAttr(PROG.hull.a.aN,mesh.n,3);
+  bindAttr(PROG.hull.a.aC,mesh.c,3); bindAttr(PROG.hull.a.aE,mesh.e,1);
+  gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER,mesh.i);
+  gl.drawElements(gl.TRIANGLES,mesh.n_i,gl.UNSIGNED_SHORT,0);
+}
+
 var couriers=[], lastCour=0;
 function spawnCourier(){
   if(!bodies.length || couriers.length>7) return;
@@ -1203,14 +1385,30 @@ function spawnCourier(){
 /* --- ships: they cross the field, they do not carry meaning --- */
 var ships=[], lastShip=0;
 function spawnShip(){
-  if(ships.length>3) return;
-  /* the visible cone on an upright phone is roughly +-3.5 wide and +-7 tall
-     at the sun's depth, so traffic has to fly inside that or it is invisible */
+  if(ships.length>2) return;
+  /* The path is laid out in front of the lens, not out among the orbits. At the
+     orbit distance one world unit is about fifty-eight pixels and a ship is a
+     speck; six units in front of the camera the same unit is a hundred and
+     forty, and the same hull is a ship crossing the frame. The camera keeps
+     turning after this, and the path does not follow it — which is right: it was
+     a real path through the world, not a decal stuck to the screen. */
+  var fx=camLook[0]-eye[0], fy=camLook[1]-eye[1], fz=camLook[2]-eye[2];
+  var fl=Math.hypot(fx,fy,fz)||1; fx/=fl; fy/=fl; fz/=fl;
+  var depth=5.4+Math.random()*3.4;
+  /* How wide the frame actually is in world units at that depth — measured off
+     the lens, not picked. The first version used a fixed span of five units and
+     the ships spent seven eighths of every crossing outside the picture. */
+  var halfH=depth*Math.tan(FOV/2), halfW=halfH*(W/H);
+  var span=halfW*1.42, upRange=halfH*0.62;
   var side=Math.random()<0.5?-1:1;
-  var y=(Math.random()*2-1)*2.6;
-  var from=[side*4.6, y, (Math.random()*2-1)*2.4];
-  var to=[-side*4.6, y+(Math.random()*2-1)*1.4, (Math.random()*2-1)*2.4];
-  ships.push({ from:from, to:to, t:0, v:0.035+Math.random()*0.035,
+  var up=(Math.random()*2-1)*upRange, tilt=(Math.random()*2-1)*halfH*0.30;
+  var C=[eye[0]+fx*depth, eye[1]+fy*depth, eye[2]+fz*depth];
+  function pt(k,u){ return [C[0]+camRight[0]*k+camUp[0]*u,
+                            C[1]+camRight[1]*k+camUp[1]*u,
+                            C[2]+camRight[2]*k+camUp[2]*u]; }
+  ships.push({ from:pt(side*span,up), to:pt(-side*span,up+tilt),
+               t:0, v:0.15+Math.random()*0.11, bow:0.06+Math.random()*0.10,
+               size:0.30+Math.random()*0.22,
                col:[0.62,0.70,0.86], glow:[0.45,0.80,1.0], pos:[0,0,0], dir:[0,0,1] });
 }
 
@@ -1223,19 +1421,24 @@ function voices(){
   (D.systems||[]).forEach(function(x){ if(x && x.name && x.val) out.push(x.name+': '+x.val); });
   return out;
 }
+/* The workers at the star. They used to drift past the top of the frame as two
+   glowing blobs with a caption; now they stand on the star, face it, and work at
+   it with a lit tool. Their sentences are not decoration and never were — every
+   one comes out of voices(), which reads the measured log and the measured
+   systems that phone_state.py wrote. A worker cannot say anything nobody
+   measured. */
 function spawnAlien(){
-  if(aliens.length>1) return;
+  if(aliens.length>2) return;
   var v=voices(); if(!v.length) return;
   var txt=v[voiceIx % v.length]; voiceIx++;
-  var side=Math.random()<0.5?-1:1;
-  var y=2.7+Math.random()*1.6;
-  var from=[side*4.4, y, (Math.random()-0.5)*3.0];
-  var to=[-side*4.4, y+(Math.random()-0.5)*0.8, (Math.random()-0.5)*3.0];
   var el=document.createElement('div');
   el.className='bub'; el.textContent=txt;
   document.getElementById('labels').appendChild(el);
-  aliens.push({ from:from, to:to, t:0, v:0.030+Math.random()*0.012,
-                pos:[0,0,0], el:el, spin:Math.random()*6 });
+  aliens.push({ ang:Math.random()*6.2832, r:SUN_R*(2.70+Math.random()*0.85),
+                y:(Math.random()*2-1)*SUN_R*1.15,
+                drift:(Math.random()<0.5?-1:1)*(0.09+Math.random()*0.11),
+                t:0, v:0.020+Math.random()*0.008,
+                phase:Math.random()*6.2832, pos:[0,0,0], el:el });
 }
 
 /* ---------------- draw ---------------- */
@@ -1684,18 +1887,7 @@ function drawSolar(now, dt){
       glowQuad(p, 0.46, cc, f*0.95, 2.2);
       glowQuad(p, 0.17, [1,1,1], f*0.95, 3.4);
     }
-    ships.forEach(function(sh){
-      var back=[sh.pos[0]-sh.dir[0]*0.17, sh.pos[1]-sh.dir[1]*0.17, sh.pos[2]-sh.dir[2]*0.17];
-      glowQuad(back, 0.24, sh.glow, 0.60, 2.8);
-      glowQuad(back, 0.11, [0.85,0.95,1.0], 0.90, 3.8);
-      glowQuad([sh.pos[0]-sh.dir[0]*0.45, sh.pos[1]-sh.dir[1]*0.45, sh.pos[2]-sh.dir[2]*0.45],
-               0.34, sh.glow, 0.13, 2.0);
-    });
-    aliens.forEach(function(al){
-      var f=Math.sin(Math.min(1,al.t)*Math.PI);
-      glowQuad([al.pos[0],al.pos[1]-0.07,al.pos[2]], 0.78, [0.30,0.95,0.70], 0.48*f, 2.4);
-      glowQuad([al.pos[0],al.pos[1]+0.08,al.pos[2]], 0.30, [0.60,1.0,0.85], 0.95*f, 3.2);
-    });
+    drawFleet(now);
     /* whatever is in focus wears a ring, so the tap has an answer on screen */
     if(focus){
       var fp=1+Math.sin(now/420)*0.045;
@@ -2185,23 +2377,24 @@ function loop(now){
   }
   if(!drag&&!pinch&&idleT>3) camState.tAz+=dt*0.035;
   if(now-lastCour  > 1400){ lastCour=now;  spawnCourier(); }
-  if(now-lastShip  > 5200){ lastShip=now;  spawnShip(); }
+  if(now-lastShip  > 3300){ lastShip=now;  spawnShip(); }
   if(now-lastAlien > 8500){ lastAlien=now; spawnAlien(); }
 
   for(var si=ships.length-1; si>=0; si--){
     var sh=ships[si]; sh.t+=dt*sh.v;
     if(sh.t>=1){ ships.splice(si,1); continue; }
-    var pt=NX.arcAt(sh.from, sh.to, 0.9, sh.t);
-    var nx=NX.arcAt(sh.from, sh.to, 0.9, Math.min(1,sh.t+0.02));
+    var pt=NX.arcAt(sh.from, sh.to, sh.bow, sh.t);
+    var nx=NX.arcAt(sh.from, sh.to, sh.bow, Math.min(1,sh.t+0.02));
     sh.dir=[nx[0]-pt[0], nx[1]-pt[1], nx[2]-pt[2]];
     sh.pos=pt;
   }
   for(var ai=aliens.length-1; ai>=0; ai--){
-    var al=aliens[ai]; al.t+=dt*al.v; al.spin+=dt*1.1;
+    var al=aliens[ai]; al.t+=dt*al.v; al.ang+=dt*al.drift;
     if(al.t>=1){ if(al.el && al.el.parentNode) al.el.parentNode.removeChild(al.el);
                  aliens.splice(ai,1); continue; }
-    al.pos=NX.arcAt(al.from, al.to, 0.7, al.t);
-    al.pos[1]+=Math.sin(al.t*Math.PI*3)*0.16;
+    al.pos=[Math.cos(al.ang)*al.r,
+            al.y+Math.sin(now/2100+al.phase)*0.055,
+            Math.sin(al.ang)*al.r];
   }
   refreshLinkGeometry();
 
