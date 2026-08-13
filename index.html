@@ -97,6 +97,14 @@ canvas#sky{position:fixed;inset:0;width:100%;height:100%;display:block;z-index:0
 #brain .r .bar i{display:block;height:100%;border-radius:2px}
 #brain .none{font-size:13px;color:var(--dim);line-height:1.6}
 #brain .none b{color:var(--ink)}
+/* out of the way, so the head can actually be looked at */
+#brain.away{opacity:0;pointer-events:none;transform:translateY(24px)}
+#brain{transition:opacity .32s,transform .32s}
+#nav{transition:opacity .32s,transform .32s}
+#nav.away{opacity:0;pointer-events:none;transform:translateY(24px)}
+#bhint{position:fixed;bottom:calc(var(--sb) + 16px);inset-inline:0;z-index:6;text-align:center;
+  font-size:12px;color:var(--faint);opacity:0;pointer-events:none;transition:opacity .5s}
+#bhint.on{opacity:1}
 /* the two runners — the only things here that can be dead right now */
 #brain .run{display:flex;flex-direction:column;gap:6px;margin-bottom:11px;
   padding-bottom:11px;border-bottom:1px solid rgba(255,255,255,.09)}
@@ -234,6 +242,7 @@ canvas#sky{position:fixed;inset:0;width:100%;height:100%;display:block;z-index:0
 </div>
 
 <div id="brain"><div class="box"></div></div>
+<div id="bhint">גרירה מסובבת · צביטה מקרבת · נגיעה מחזירה את הפרטים</div>
 <div id="stale"></div>
 <div id="sheet">
   <div id="grab"><i></i></div>
@@ -1632,7 +1641,7 @@ function brainPrograms(){
     "varying vec3 vCol; varying float vKind; varying float vOn;"+
     "void main(){ vec4 p=uMVP*vec4(aPos,1.0); gl_Position=p;"+
     "  float w=max(p.w,0.08);"+
-    "  gl_PointSize=clamp(uPx*aMeta.x/w, 1.0, 120.0);"+
+    "  gl_PointSize=clamp(uPx*aMeta.x/w, 1.0, 58.0);"+
     /* the skin is lit like a surface, not sprayed like confetti */
     "  float sh=1.0;"+
     "  if(aMeta.y>1.5){ vec3 n=normalize(aPos); vec3 vd=normalize(uEye-aPos);"+
@@ -1832,8 +1841,19 @@ function bmesh(front){
    a column down the left and the head goes right. */
 function brainFrame(){
   var land = window.innerHeight <= 560 && window.innerWidth > window.innerHeight;
+  /* with the panel gone the head owns the whole screen and sits in the middle;
+     with the panel up it is pushed clear of it */
+  if(BARE) return { dist: 4.6, y: 0.0, x: 0 };
   return land ? { dist: 5.2, y: 0.02, x: -0.46 }
               : { dist: 6.1, y:-0.34, x: 0 };
+}
+var BARE=false;
+function brainBare(on){
+  BARE=!!on;
+  document.getElementById('brain').classList.toggle('away',BARE);
+  document.getElementById('nav').classList.toggle('away',BARE);
+  document.getElementById('bhint').classList.toggle('on',BARE);
+  var f=brainFrame(); shiftTo=f.y; camState.tDist=f.dist;
 }
 
 function drawBrain(now, dt){
@@ -2216,6 +2236,12 @@ function placeBubbles(){
   }
 }
 
+/* How close the camera may get, and how far it may back off. These used to be
+   one pair of numbers for a scene ten units wide; the head is 1.35 across, so a
+   floor of 5.5 meant it could never actually be approached. Each scene gets its
+   own range. */
+function zoomRange(){ return (view==='brain') ? [1.90, 13.0] : [5.5, 26.0]; }
+
 var drag=null,pinch=null,idleT=0;
 cv.addEventListener('pointerdown',function(e){
   if(e.pointerType==='touch' && pinch) return;
@@ -2232,20 +2258,24 @@ cv.addEventListener('pointermove',function(e){
 });
 cv.addEventListener('pointerup',function(e){
   var tapped = drag && drag.moved<9; drag=null;
-  /* there are no planets in the brain view — a tap there would focus something
-     that is not on screen and fly the camera away from what you are looking at */
-  if(tapped && view!=='brain') hit(e.clientX,e.clientY);
+  /* In the head a tap has nothing to focus, so it does the thing that is
+     actually wanted there: it gets the panel out of the way. Tapping again
+     brings it back. Nothing is lost and nothing needs a button. */
+  if(tapped && view==='brain'){ brainBare(!BARE); return; }
+  if(tapped) hit(e.clientX,e.clientY);
 });
 cv.addEventListener('pointercancel',function(){ drag=null; });
 cv.addEventListener('wheel',function(e){
-  camState.tDist=Math.max(5.5,Math.min(26,camState.tDist+e.deltaY*0.012)); idleT=0;
+  var zr=zoomRange();
+  camState.tDist=Math.max(zr[0],Math.min(zr[1],camState.tDist+e.deltaY*0.012)); idleT=0;
 },{passive:true});
 cv.addEventListener('touchstart',function(e){
   if(e.touches.length===2){ pinch={d:td(e),base:camState.tDist}; drag=null; }
 },{passive:true});
 cv.addEventListener('touchmove',function(e){
   if(pinch&&e.touches.length===2){
-    var d=td(e); camState.tDist=Math.max(5.5,Math.min(26,pinch.base*(pinch.d/Math.max(1,d)))); idleT=0; }
+    var d=td(e), zr2=zoomRange();
+    camState.tDist=Math.max(zr2[0],Math.min(zr2[1],pinch.base*(pinch.d/Math.max(1,d)))); idleT=0; }
 },{passive:true});
 cv.addEventListener('touchend',function(e){ if(e.touches.length<2) pinch=null; },{passive:true});
 function td(e){ var a=e.touches[0],b=e.touches[1];
